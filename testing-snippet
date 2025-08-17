@@ -8,6 +8,8 @@ class JavaStubParser:
     def __init__(self, stub_folder_path: str):
         self.stub_folder_path = stub_folder_path
         self.classes = {}  # class_name -> ClassInfo
+        self.qualified_classes = {}  # fully_qualified_name -> ClassInfo  
+        self.class_name_to_qualified = {}  # simple_name -> [qualified_names]
         self.getter_chains = defaultdict(list)  # class_name -> list of getter chains
         self.primitive_types = {
             'String', 'Integer', 'int', 'Long', 'long', 'Double', 'double', 
@@ -16,34 +18,56 @@ class JavaStubParser:
         }
         
     class ClassInfo:
-        def __init__(self, name: str):
+        def __init__(self, name: str, package: str = ""):
             self.name = name
+            self.package = package
+            self.qualified_name = f"{package}.{name}" if package else name
             self.fields = {}  # field_name -> field_type
             self.getters = {}  # getter_method -> field_name
+            self.imports = set()  # imported classes
             self.is_enum = False
             self.is_list_wrapper = False
             self.list_element_type = None
             
     def parse_java_files(self):
-        """Parse all Java files in the stub folder"""
-        print(f"Parsing Java files in: {self.stub_folder_path}")
+        """Parse all Java files in the stub folder and all subdirectories"""
+        print(f"Parsing Java files recursively in: {self.stub_folder_path}")
         
+        java_files = []
         for root, dirs, files in os.walk(self.stub_folder_path):
             for file in files:
                 if file.endswith('.java'):
                     file_path = os.path.join(root, file)
-                    try:
-                        self._parse_single_file(file_path)
-                    except Exception as e:
-                        print(f"Error parsing {file_path}: {e}")
+                    java_files.append(file_path)
+        
+        print(f"Found {len(java_files)} Java files to parse")
+        
+        # First pass: collect all classes and their packages
+        for file_path in java_files:
+            try:
+                self._parse_single_file(file_path)
+            except Exception as e:
+                print(f"Error parsing {file_path}: {e}")
+        
+        # Build lookup maps for type resolution
+        self._build_type_lookup_maps()
                         
-        print(f"Parsed {len(self.classes)} classes")
+        print(f"Parsed {len(self.classes)} classes from {len(java_files)} files")
+        print(f"Classes span across {len(set(info.package for info in self.classes.values() if info.package))} packages")
         
     def _parse_single_file(self, file_path: str):
         """Parse a single Java file"""
         with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
             content = f.read()
             
+        # Extract package name
+        package_match = re.search(r'package\s+([\w\.]+)\s*;', content)
+        package_name = package_match.group(1) if package_match else ""
+        
+        # Extract imports
+        import_matches = re.findall(r'import\s+([\w\.]+)\s*;', content)
+        imports = set(import_matches)
+        
         # Remove comments and clean up
         content = self._remove_comments(content)
         
@@ -60,7 +84,7 @@ class JavaStubParser:
             # Find the class body
             class_body = self._extract_class_body(content, class_start)
             if class_body:
-                self._parse_class_content(class_name, class_body, content)
+                self._parse_class_content(class_name, class_body, content, package_name, imports)
                 
     def _remove_comments(self, content: str) -> str:
         """Remove Java comments from content"""
@@ -86,14 +110,16 @@ class JavaStubParser:
                     return content[class_start:i]
         return None
         
-    def _parse_class_content(self, class_name: str, class_body: str, full_content: str):
+    def _parse_class_content(self, class_name: str, class_body: str, full_content: str, package_name: str = "", imports: set = None):
         """Parse the content of a class"""
-        class_info = self.ClassInfo(class_name)
+        class_info = self.ClassInfo(class_name, package_name)
+        class_info.imports = imports or set()
         
         # Check if it's an enum
         if 'enum ' + class_name in full_content:
             class_info.is_enum = True
             self.classes[class_name] = class_info
+            self.qualified_classes[class_info.qualified_name] = class_info
             return
             
         # Parse fields
@@ -114,7 +140,7 @@ class JavaStubParser:
                     class_info.list_element_type = element_match.group(1).strip()
                     
         # Parse getter methods
-        getter_pattern = r'(?:public|protected)\s+([A-Za-z_][\w<>,\[\]\s]*)\s+(get\w+)\s*\([^)]*\)\s*{'
+        getter_pattern = r'(?:public|protected)\s+([A-Za-z_][\w<>,\[\]\s]*)\s+(get\w+|is\w+)\s*\([^)]*\)\s*{'
         getter_matches = re.findall(getter_pattern, class_body)
         
         for return_type, getter_method in getter_matches:
@@ -131,6 +157,7 @@ class JavaStubParser:
             class_info.getters[getter_method] = field_name
             
         self.classes[class_name] = class_info
+        self.qualified_classes[class_info.qualified_name] = class_info
         
     def _clean_type(self, type_str: str) -> str:
         """Clean up Java type string"""
@@ -152,7 +179,76 @@ class JavaStubParser:
         # Convert first letter to lowercase
         if field_name:
             field_name = field_name[0].lower() + field_name[1:]
-        return field_name
+    def _build_type_lookup_maps(self):
+        """Build lookup maps for resolving types across packages"""
+        for class_info in self.classes.values():
+            simple_name = class_info.name
+            if simple_name not in self.class_name_to_qualified:
+                self.class_name_to_qualified[simple_name] = []
+            self.class_name_to_qualified[simple_name].append(class_info.qualified_name)
+    
+    def _resolve_type(self, type_name: str, current_class_info: 'ClassInfo' = None) -> str:
+        """Resolve a type name to its fully qualified name"""
+        # Remove generic parameters for resolution
+        base_type = re.sub(r'<.*>', '', type_name).strip()
+        
+        # If already qualified or primitive, return as is
+        if '.' in base_type or base_type in self.primitive_types:
+            return type_name
+            
+        # Try exact match first
+        if base_type in self.classes:
+            return type_name
+            
+        # Look for the type in qualified classes
+        if base_type in self.class_name_to_qualified:
+            candidates = self.class_name_to_qualified[base_type]
+            
+            # If current class info is available, prefer same package
+            if current_class_info and current_class_info.package:
+                same_package_candidate = f"{current_class_info.package}.{base_type}"
+                if same_package_candidate in candidates:
+                    return type_name  # Use simple name but we know it resolves
+                    
+                # Check imports
+                for import_name in current_class_info.imports:
+                    if import_name.endswith('.' + base_type) and import_name in candidates:
+                        return type_name  # Use simple name but we know it resolves
+            
+            # If only one candidate, use it
+            if len(candidates) == 1:
+                return type_name
+                
+        return type_name  # Return as-is if can't resolve
+    
+    def _find_class_info(self, type_name: str, current_class_info: 'ClassInfo' = None) -> 'ClassInfo':
+        """Find ClassInfo for a given type name"""
+        base_type = re.sub(r'<.*>', '', type_name).strip()
+        
+        # Try simple name first
+        if base_type in self.classes:
+            return self.classes[base_type]
+            
+        # Try qualified lookup
+        if base_type in self.class_name_to_qualified:
+            candidates = self.class_name_to_qualified[base_type]
+            
+            if current_class_info:
+                # Prefer same package
+                same_package = f"{current_class_info.package}.{base_type}"
+                if same_package in self.qualified_classes:
+                    return self.qualified_classes[same_package]
+                    
+                # Check imports
+                for import_name in current_class_info.imports:
+                    if import_name.endswith('.' + base_type) and import_name in self.qualified_classes:
+                        return self.qualified_classes[import_name]
+            
+            # Return first candidate if available
+            if candidates and candidates[0] in self.qualified_classes:
+                return self.qualified_classes[candidates[0]]
+                
+        return None
         
     def generate_getter_chains(self, root_class_name: str, max_depth: int = 10):
         """Generate all possible getter chains from the root class"""
@@ -171,10 +267,14 @@ class JavaStubParser:
                 
             if current_class not in self.classes:
                 print(f"DEBUG: Class '{current_class}' not found in parsed classes")
-                return
+                # Try to find it using the new type resolution
+                class_info = self._find_class_info(current_class, self.classes.get(root_class_name))
+                if not class_info:
+                    return
+            else:
+                class_info = self.classes[current_class]
                 
             visited.add(current_class)
-            class_info = self.classes[current_class]
             
             print(f"DEBUG: Processing class '{current_class}' at depth {depth}, getters: {list(class_info.getters.keys())}")
             
@@ -201,17 +301,25 @@ class JavaStubParser:
                         all_chains.append(indexed_chain.copy())
                         
                         # Continue with the element type
-                        if element_class not in self.primitive_types and element_class in self.classes:
-                            print(f"DEBUG: Continuing DFS with element class '{element_class}'")
-                            dfs(element_class, indexed_chain, depth + 1)
+                        if element_class not in self.primitive_types:
+                            element_class_info = self._find_class_info(element_class, class_info)
+                            if element_class_info:
+                                print(f"DEBUG: Continuing DFS with element class '{element_class}'")
+                                dfs(element_class_info.name, indexed_chain, depth + 1)
+                            else:
+                                print(f"DEBUG: Element class '{element_class}' not found")
                         else:
-                            print(f"DEBUG: Element class '{element_class}' is primitive or not found")
+                            print(f"DEBUG: Element class '{element_class}' is primitive")
                 
                 # Handle regular object types
-                elif field_type not in self.primitive_types and field_type in self.classes:
-                    print(f"DEBUG: Found complex type '{field_type}', continuing DFS")
-                    new_chain = chain + [f"{getter_method}()"]
-                    dfs(field_type, new_chain, depth + 1)
+                elif field_type not in self.primitive_types:
+                    target_class_info = self._find_class_info(field_type, class_info)
+                    if target_class_info:
+                        print(f"DEBUG: Found complex type '{field_type}', continuing DFS")
+                        new_chain = chain + [f"{getter_method}()"]
+                        dfs(target_class_info.name, new_chain, depth + 1)
+                    else:
+                        print(f"DEBUG: Type '{field_type}' not found - might be missing from parsed classes")
                 
                 # Handle primitive types (end of chain)
                 elif field_type in self.primitive_types:
