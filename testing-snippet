@@ -56,6 +56,23 @@ class JavaStubParser:
 
         self._build_type_lookup_maps()
         print(f"Classes extracted: {len(self.classes)}")
+        self._print_parsed_classes()
+
+    def _print_parsed_classes(self):
+        """Prints a list of all successfully parsed classes"""
+        print("\n" + "="*60)
+        print("SUCCESSFULLY PARSED CLASSES")
+        print("="*60)
+        if not self.classes:
+            print("No classes were parsed.")
+            return
+
+        sorted_classes = sorted(self.classes.keys())
+        for i, class_name in enumerate(sorted_classes, 1):
+            class_info = self.classes[class_name]
+            print(f"{i:3d}. {class_info.qualified_name}")
+        print("="*60 + "\n")
+
 
     def _parse_single_file(self, file_path: str):
         """Parse a single Java file"""
@@ -206,41 +223,51 @@ class JavaStubParser:
         It must be given the context of the parent class (current_class_info) to work correctly.
         """
         base_type = re.sub(r'<.*>', '', type_name).strip()
-
+        
+        print(f"- Resolving '{base_type}' from context '{current_class_info.qualified_name if current_class_info else 'N/A'}'")
+        
         if not current_class_info:
+            print("- - No context provided. Resolution failed.")
             return None
             
         # 1. Handle primitive types
         if base_type in self.primitive_types:
+            print("- - Type is a primitive. Resolution complete.")
             return None
 
         # 2. Look for explicit import
+        print("- - Checking explicit imports...")
         for import_name in current_class_info.imports:
             if import_name.endswith('.' + base_type):
                 resolved_class_info = self.qualified_classes.get(import_name)
                 if resolved_class_info:
-                    print(f"    - Type '{base_type}' resolved via explicit import to '{import_name}'")
+                    print(f"- - Resolved via explicit import to '{import_name}'")
                     return resolved_class_info
+        print("- - No match found in imports.")
 
         # 3. Look in the same package as the current class
+        print("- - Checking same package...")
         if current_class_info.package:
             qualified_name = f"{current_class_info.package}.{base_type}"
             resolved_class_info = self.qualified_classes.get(qualified_name)
             if resolved_class_info:
-                print(f"    - Type '{base_type}' resolved via same package to '{qualified_name}'")
+                print(f"- - Resolved via same package to '{qualified_name}'")
                 return resolved_class_info
-        
-        # 4. Fallback to simple name lookup (this is where ambiguity occurs)
+        print("- - No match found in same package.")
+
+        # 4. Fallback to simple name lookup
+        print("- - Checking simple name lookup...")
         if base_type in self.class_name_to_qualified:
             candidates = self.class_name_to_qualified[base_type]
             if len(candidates) == 1:
-                print(f"    - Type '{base_type}' resolved uniquely to '{candidates[0]}'")
+                print(f"- - Resolved uniquely to '{candidates[0]}'")
                 return self.qualified_classes.get(candidates[0])
             elif candidates:
-                # We've exhausted reliable methods. The script will pick a candidate.
-                print(f"    - AMBIGUOUS RESOLUTION WARNING: '{base_type}' could not be resolved by import or package. Found candidates: {candidates}. Selecting a potentially incorrect candidate.")
+                print(f"- - AMBIGUOUS RESOLUTION WARNING: Found candidates: {candidates}. Selecting first.")
                 return self.qualified_classes.get(candidates[0])
+        print("- - No match found in simple name lookup.")
 
+        print("- - Resolution failed.")
         return None
 
     def generate_getter_chains(self, root_class_name: str, max_depth: int = 10):
