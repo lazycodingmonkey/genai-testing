@@ -160,7 +160,7 @@ class JavaStubParser:
         
         if root_class_name not in self.classes:
             print(f"Root class {root_class_name} not found!")
-            return
+            return []
             
         visited = set()
         all_chains = []
@@ -327,6 +327,14 @@ def main():
     # Generate getter chains
     max_depth = int(input("Enter maximum depth for getter chains (default: 8): ") or "8")
     chains = parser.generate_getter_chains(root_class, max_depth)
+    
+    # Handle case where chains is None or empty
+    if not chains:
+        print(f"No getter chains found for class '{root_class}'. Please check:")
+        print("1. The class name is correct")
+        print("2. The class has getter methods")
+        print("3. The Java files were parsed correctly")
+        return
     
     # Display results
     print(f"\n{'='*60}")
