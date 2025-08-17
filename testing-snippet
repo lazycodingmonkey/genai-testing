@@ -8,11 +8,11 @@ class JavaStubParser:
     def __init__(self, stub_folder_path: str):
         self.stub_folder_path = stub_folder_path
         self.classes = {}  # class_name -> ClassInfo
-        self.qualified_classes = {}  # fully_qualified_name -> ClassInfo  
+        self.qualified_classes = {}  # fully_qualified_name -> ClassInfo
         self.class_name_to_qualified = {}  # simple_name -> [qualified_names]
         self.getter_chains = defaultdict(list)  # class_name -> list of getter chains
         self.primitive_types = {
-            'String', 'Integer', 'int', 'Long', 'long', 'Double', 'double', 
+            'String', 'Integer', 'int', 'Long', 'long', 'Double', 'double',
             'Float', 'float', 'Boolean', 'boolean', 'BigDecimal', 'BigInteger',
             'Date', 'Calendar', 'XMLGregorianCalendar', 'byte[]', 'Byte',
             'Short', 'short', 'Character', 'char', 'Object', 'Number',
@@ -20,7 +20,7 @@ class JavaStubParser:
             'UUID', 'URI', 'URL', 'BigInteger', 'AtomicInteger', 'AtomicLong',
             'byte', 'Byte[]', 'char[]', 'String[]'
         }
-        
+
     class ClassInfo:
         def __init__(self, name: str, package: str = ""):
             self.name = name
@@ -32,73 +32,73 @@ class JavaStubParser:
             self.is_enum = False
             self.is_list_wrapper = False
             self.list_element_type = None
-            
+
     def parse_java_files(self):
         """Parse all Java files in the stub folder and all subdirectories"""
         print(f"Parsing Java files recursively in: {self.stub_folder_path}")
-        
+
         java_files = []
         for root, dirs, files in os.walk(self.stub_folder_path):
             java_files_in_dir = [os.path.join(root, f) for f in files if f.endswith('.java')]
             java_files.extend(java_files_in_dir)
-            
+
         print(f"Total Java files found: {len(java_files)}")
-        
+
         if not java_files:
             print(f"ERROR: No Java files found in {self.stub_folder_path}")
             return
-            
+
         for file_path in java_files:
             try:
                 self._parse_single_file(file_path)
             except Exception as e:
                 print(f"ERROR parsing {file_path}: {e}")
-        
+
         self._build_type_lookup_maps()
         print(f"Classes extracted: {len(self.classes)}")
-            
+
     def _parse_single_file(self, file_path: str):
         """Parse a single Java file"""
         with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
             content = f.read()
-            
+
         # Extract package name
         package_match = re.search(r'package\s+([\w\.]+)\s*;', content)
         package_name = package_match.group(1) if package_match else ""
-        
+
         # Extract imports
         import_matches = re.findall(r'import\s+([\w\.]+)\s*;', content)
         imports = set(import_matches)
-        
+
         # Remove comments and clean up
         content = self._remove_comments(content)
-        
+
         # Extract class definitions - more flexible regex
         class_matches = re.finditer(
             r'public\s+(?:abstract\s+)?(?:final\s+)?(?:class|enum|interface)\s+(\w+)(?:\s+extends\s+\w+)?(?:\s+implements\s+[\w,\s]+)?\s*{',
             content, re.MULTILINE
         )
-        
+
         for match in class_matches:
             class_name = match.group(1)
             class_start = match.start()
-            
+
             # Find the class body
             class_body = self._extract_class_body(content, class_start)
             if class_body:
                 self._parse_class_content(class_name, class_body, content, package_name, imports)
-                
+
     def _remove_comments(self, content: str) -> str:
         """Remove Java comments from content"""
         content = re.sub(r'//.*$', '', content, flags=re.MULTILINE)
         content = re.sub(r'/\*.*?\*/', '', content, flags=re.DOTALL)
         return content
-        
+
     def _extract_class_body(self, content: str, start_pos: int) -> Optional[str]:
         """Extract the body of a class using brace matching"""
         brace_count = 0
         class_start = -1
-        
+
         for i in range(start_pos, len(content)):
             if content[i] == '{':
                 if class_start == -1:
@@ -109,28 +109,28 @@ class JavaStubParser:
                 if brace_count == 0 and class_start != -1:
                     return content[class_start:i]
         return None
-        
+
     def _parse_class_content(self, class_name: str, class_body: str, full_content: str, package_name: str = "", imports: set = None):
         """Parse the content of a class"""
         class_info = self.ClassInfo(class_name, package_name)
         class_info.imports = imports or set()
-        
+
         if 'enum ' + class_name in full_content:
             class_info.is_enum = True
             self.classes[class_name] = class_info
             self.qualified_classes[class_info.qualified_name] = class_info
             return
-            
+
         # Method 1: Parse from getter methods (most reliable for WSDL stubs)
         getter_pattern = r'public\s+([A-Za-z_][\w<>,\[\]\.\s]*?)\s+(get\w+|is\w+)\s*\(\s*\)\s*\{[^}]*return\s+[^;]*;'
         getter_matches = re.findall(getter_pattern, class_body, re.MULTILINE | re.DOTALL)
-        
+
         for return_type, getter_method in getter_matches:
             clean_type = self._clean_type(return_type)
             field_name = self._getter_to_field_name(getter_method)
             class_info.fields[field_name] = clean_type
             class_info.getters[getter_method] = field_name
-            
+
         # Method 2: Fallback to field declarations if no getters found
         if not class_info.fields:
             field_pattern = r'(?:protected|public|private)\s+([A-Za-z_][\w<>,\[\]\.\s]+?)\s+(\w+)\s*;'
@@ -147,15 +147,15 @@ class JavaStubParser:
                 match = re.search(r'List<(.+?)>', field_type)
                 if match:
                     class_info.list_element_type = self._clean_type(match.group(1))
-        
+
         self.classes[class_name] = class_info
         self.qualified_classes[class_info.qualified_name] = class_info
-            
+
     def _clean_type(self, type_str: str) -> str:
         """Clean up Java type string - IMPROVED VERSION"""
         if not type_str:
             return type_str
-        
+
         # Remove annotations
         type_str = re.sub(r'@\w+(\([^)]*\))?\s*', '', type_str)
         # Handle JAXBElement wrapper
@@ -170,11 +170,11 @@ class JavaStubParser:
         # Handle namespace prefixes (e.g., "ns1:CustomerType")
         if ':' in type_str:
             type_str = type_str.split(':')[-1]
-            
+
         type_str = re.sub(r'\s+', '', type_str).strip()
-        
+
         return type_str
-        
+
     def _getter_to_field_name(self, getter_method: str) -> str:
         """Convert getter method name to field name"""
         if getter_method.startswith('get'):
@@ -183,15 +183,15 @@ class JavaStubParser:
             field_name = getter_method[2:]
         else:
             field_name = getter_method
-            
+
         if field_name:
             field_name = field_name[0].lower() + field_name[1:]
-            
+
         if field_name.startswith('_'):
             field_name = field_name[1:]
-            
+
         return field_name
-            
+
     def _build_type_lookup_maps(self):
         """Build lookup maps for resolving types across packages"""
         for class_info in self.classes.values():
@@ -199,11 +199,11 @@ class JavaStubParser:
             if simple_name not in self.class_name_to_qualified:
                 self.class_name_to_qualified[simple_name] = []
             self.class_name_to_qualified[simple_name].append(class_info.qualified_name)
-    
+
     def _find_class_info(self, type_name: str, current_class_info: 'ClassInfo' = None) -> Optional['ClassInfo']:
         """Find ClassInfo for a given type name using a robust Java resolution strategy"""
         base_type = re.sub(r'<.*>', '', type_name).strip()
-        
+
         # If the type is already a fully qualified name, just look it up.
         if '.' in base_type:
             if base_type in self.qualified_classes:
@@ -212,7 +212,7 @@ class JavaStubParser:
             return None
 
         # --- Resolution by Java's import rules ---
-        
+
         # 1. Look for explicit import
         if current_class_info:
             for import_name in current_class_info.imports:
@@ -220,14 +220,14 @@ class JavaStubParser:
                     if import_name in self.qualified_classes:
                         print(f"    - Type '{base_type}' resolved via explicit import to '{import_name}'")
                         return self.qualified_classes[import_name]
-        
+
         # 2. Look in the same package as the current class
         if current_class_info and current_class_info.package:
             qualified_name = f"{current_class_info.package}.{base_type}"
             if qualified_name in self.qualified_classes:
                 print(f"    - Type '{base_type}' resolved via same package to '{qualified_name}'")
                 return self.qualified_classes[qualified_name]
-                
+
         # 3. Fallback: Find by simple name (potential for ambiguity)
         if base_type in self.class_name_to_qualified:
             candidates = self.class_name_to_qualified[base_type]
@@ -241,60 +241,52 @@ class JavaStubParser:
 
         print(f"    - Type '{base_type}' could not be resolved.")
         return None
-        
+
     def generate_getter_chains(self, root_class_name: str, max_depth: int = 10):
         """Generate all possible getter chains from the root class using a robust BFS"""
         if root_class_name not in self.classes:
             print(f"Root class '{root_class_name}' not found! Check spelling or if it was parsed.")
             return []
-            
+
         root_info = self.classes[root_class_name]
         all_chains = set()
         queue = deque([(root_info.name, "", 0)])  # (class_name, current_chain_prefix, depth)
         visited = set()  # To prevent infinite loops with circular dependencies
 
         print(f"\nStarting BFS for getter chains from '{root_class_name}'...")
-        
+
         while queue:
             current_class_name, current_chain, depth = queue.popleft()
-            
-            # Check for max depth
+
             if depth >= max_depth:
-                # This log is now less chatty
                 continue
-            
-            # Get the current class info. Use _find_class_info for robustness
+
             current_info = self._find_class_info(current_class_name, self.classes.get(root_class_name))
             if not current_info:
-                print(f"  - Chain stopped at '{current_chain}': Type '{current_class_name}' could not be resolved.")
+                # This is the new, more helpful debug message
+                print(f"  - Chain stopped at '{current_chain}': Type '{current_class_name}' could not be resolved. This type might not exist in the provided stub files.")
                 continue
-                
-            # Add to visited to prevent cycles
-            # We add the class name AND the current chain to allow for multiple paths to the same class
+
             if (current_class_name, current_chain) in visited:
                 continue
             visited.add((current_class_name, current_chain))
-            
-            # Print which class is being processed
+
             print(f"  Processing '{current_info.qualified_name}' at depth {depth}.")
-            
+
             if not current_info.getters:
-                # Chain ends here, no getters to navigate
                 continue
-            
+
             for getter_method, field_name in current_info.getters.items():
                 field_type = current_info.fields.get(field_name)
                 
                 if not field_type:
                     continue
-                    
+
                 new_chain_part = f".{getter_method}()" if current_chain else f"{getter_method}()"
                 new_chain = current_chain + new_chain_part
-                
-                # We always add the current getter to the list of chains
+
                 all_chains.add(new_chain)
 
-                # Check if the field type is a collection
                 if field_type.startswith('List<') or field_type.startswith('ArrayList<'):
                     match = re.search(r'List<(.+?)>', field_type)
                     if match:
@@ -303,21 +295,14 @@ class JavaStubParser:
                         if element_info:
                             indexed_chain = new_chain + ".get(i)"
                             all_chains.add(indexed_chain)
-                            # Add the next object in the chain to the queue
                             queue.append((element_info.name, indexed_chain, depth + 1))
-                        else:
-                            # Primitive or un-parsed list element type
-                            pass
-                # Check if the field type is a complex object
                 elif field_type not in self.primitive_types:
                     target_class_info = self._find_class_info(field_type, current_info)
                     if target_class_info:
                         queue.append((target_class_info.name, new_chain, depth + 1))
-                    else:
-                        pass
-                        
+
         formatted_chains = [f"rootObject.{chain}" for chain in all_chains]
-        
+
         self.getter_chains[root_class_name] = sorted(list(set(formatted_chains)))
         return self.getter_chains[root_class_name]
 
@@ -331,7 +316,7 @@ class JavaStubParser:
                 "total_chains": sum(len(chains) for chains in self.getter_chains.values())
             }
         }
-        
+
         for class_name, class_info in self.classes.items():
             results["classes"][class_name] = {
                 "fields": class_info.fields,
@@ -340,78 +325,78 @@ class JavaStubParser:
                 "is_list_wrapper": class_info.is_list_wrapper,
                 "list_element_type": class_info.list_element_type
             }
-            
+
         with open(output_file, 'w', encoding='utf-8') as f:
             json.dump(results, f, indent=2, ensure_ascii=False)
-            
+
         print(f"Results exported to: {output_file}")
-        
+
     def print_analysis_summary(self):
         """Print a summary of the analysis"""
         print("\n" + "="*60)
         print("JAVA STUB ANALYSIS SUMMARY")
         print("="*60)
         print(f"Total Classes Parsed: {len(self.classes)}")
-        
+
         enum_count = sum(1 for c in self.classes.values() if c.is_enum)
         list_wrapper_count = sum(1 for c in self.classes.values() if c.is_list_wrapper)
-        
+
         print(f"Enum Classes: {enum_count}")
         print(f"List Wrapper Classes: {list_wrapper_count}")
         print(f"Regular Classes: {len(self.classes) - enum_count - list_wrapper_count}")
-        
+
         if self.getter_chains:
             for root_class, chains in self.getter_chains.items():
                 chain_count = len(chains) if chains else 0
                 print(f"\nGetter Chains for {root_class}: {chain_count} chains found")
-                
+
     def find_root_classes(self) -> List[str]:
         """Identify potential root classes (classes that are not referenced as field types)"""
         referenced_types = set()
-        
+
         for class_info in self.classes.values():
             for field_type in class_info.fields.values():
                 base_type = re.sub(r'<.*?>', '', field_type).strip()
                 referenced_types.add(base_type)
-                
+
         root_candidates = []
         for class_name in self.classes.keys():
             if class_name not in referenced_types:
                 root_candidates.append(class_name)
-                
+
         return root_candidates
 
 def main():
     # Configuration
     STUB_FOLDER_PATH = input("Enter the path to your Java stub folder: ").strip()
-    
+
     if not os.path.exists(STUB_FOLDER_PATH):
         print(f"Error: Path '{STUB_FOLDER_PATH}' does not exist!")
         return
-        
+
     # Initialize parser
     parser = JavaStubParser(STUB_FOLDER_PATH)
-    
+
     # Parse all Java files
     parser.parse_java_files()
-    
+
     # Enhanced Debug: Show comprehensive parsing results
     print(f"\nDETAILED PARSING RESULTS:")
     print(f"Total Java files found: {sum(1 for root, dirs, files in os.walk(parser.stub_folder_path) for file in files if file.endswith('.java'))}")
     print(f"Total classes parsed: {len(parser.classes)}")
-    
+
     # Print summary
     parser.print_analysis_summary()
-    
+
     # Find potential root classes
     root_candidates = parser.find_root_classes()
     print(f"\nPotential Root Classes Found: {len(root_candidates)}")
     for i, root_class in enumerate(root_candidates[:10], 1):  # Show first 10
         print(f"{i}. {root_class}")
-    
+
     if len(root_candidates) > 10:
         print(f"... and {len(root_candidates) - 10} more")
-    
+
     # Get root class from user
     if root_candidates:
         print(f"\nSuggested root class: {root_candidates[0]}")
@@ -419,20 +404,20 @@ def main():
         root_class = root_class_input if root_class_input else root_candidates[0]
     else:
         root_class = input("Enter the root class name: ").strip()
-    
+
     if root_class not in parser.classes:
         print(f"ERROR: Root class '{root_class}' not found in parsed classes!")
         return
-        
+
     # Generate getter chains
     max_depth = int(input("Enter maximum depth for getter chains (default: 10): ") or "10")
     print(f"\nStarting getter chain generation with max depth: {max_depth}")
     chains = parser.generate_getter_chains(root_class, max_depth)
-    
+
     if not chains:
         print(f"No getter chains found for class '{root_class}'.")
         return
-    
+
     # Display results
     print(f"\n{'='*60}")
     print(f"GETTER CHAINS FOR {root_class}")
@@ -441,14 +426,14 @@ def main():
     print("\nFirst 20 getter chains:")
     for i, chain in enumerate(chains[:20], 1):
         print(f"{i:2d}. {chain}")
-        
+
     if len(chains) > 20:
         print(f"\n... and {len(chains) - 20} more chains")
-    
+
     # Export results
     output_file = f"getter_chains_{root_class.lower()}.json"
     parser.export_results(output_file)
-    
+
     chains_file = f"getter_chains_{root_class.lower()}.txt"
     with open(chains_file, 'w', encoding='utf-8') as f:
         f.write(f"Getter Chains for {root_class}\n")
@@ -456,10 +441,3 @@ def main():
         f.write(f"Total chains: {len(chains)}\n\n")
         for i, chain in enumerate(chains, 1):
             f.write(f"{i:4d}. {chain}\n")
-    
-    print(f"\nGetter chains saved to: {chains_file}")
-    print("Analysis complete!")
-
-
-if __name__ == "__main__":
-    main()
