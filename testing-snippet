@@ -11,8 +11,8 @@ ROOT_CLASS_NAME = 'RootObject'  # <-- IMPORTANT: CHANGE THIS
 ROOT_OBJECT_VARIABLE = 'rootObject'
 
 # A set of types that should be considered "terminal". 
-# The script will not try to find getters in these. Add any other primitive
-# or standard library types you encounter.
+# The script will not try to find getters in these. 
+# Enums found during parsing will be added to this set automatically.
 TERMINAL_TYPES = {
     'String', 'int', 'Integer', 'long', 'Long', 'double', 'Double',
     'boolean', 'Boolean', 'BigDecimal', 'XMLGregorianCalendar', 'Object'
@@ -37,12 +37,15 @@ def parse_java_files(directory):
         directory (str): The path to the directory containing .java files.
 
     Returns:
-        dict: A dictionary mapping class names to a list of FieldInfo objects.
+        A tuple containing:
+        - dict: A dictionary mapping class names to a list of FieldInfo objects.
+        - set: A set of all enum names found.
     """
     class_map = defaultdict(list)
+    enum_names = set()
     if not os.path.isdir(directory):
         print(f"Error: Directory not found at '{directory}'")
-        return class_map
+        return class_map, enum_names
 
     print(f"Scanning for .java files in '{directory}'...")
     for root, _, files in os.walk(directory):
@@ -50,43 +53,54 @@ def parse_java_files(directory):
             if file.endswith('.java'):
                 filepath = os.path.join(root, file)
                 print(f"  Parsing: {filepath}")
-                with open(filepath, 'r', encoding='utf-8') as f:
+                with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
                     try:
                         content = f.read()
                         tree = javalang.parse.parse(content)
                         
-                        # Find class or interface declarations
-                        for _, node in tree.filter(javalang.tree.ClassDeclaration):
-                            class_name = node.name
-                            for field_declaration in node.fields:
-                                field_type_node = field_declaration.type
-                                field_type_name = field_type_node.name
-                                is_list = field_type_name == 'List'
+                        # javalang's filter is recursive, finding all type declarations
+                        # including inner/nested classes.
+                        for _, node in tree.filter(javalang.tree.TypeDeclaration):
+                            type_name = node.name
 
-                                # If it's a generic type like List<SomeType>, extract 'SomeType'
-                                if is_list and field_type_node.arguments:
-                                    # Assuming single type argument, e.g., List<Address>
-                                    type_arg = field_type_node.arguments[0].type
-                                    if type_arg:
-                                        field_type_name = type_arg.name
+                            if isinstance(node, javalang.tree.EnumDeclaration):
+                                enum_names.add(type_name)
+                                continue
 
-                                for declarator in field_declaration.declarators:
-                                    field_name = declarator.name
-                                    class_map[class_name].append(
-                                        FieldInfo(field_name, field_type_name, is_list)
-                                    )
-                    except javalang.tokenizer.LexerError as e:
-                        print(f"    - Could not lex file {filepath}: {e}")
-                    except javalang.parser.JavaSyntaxError as e:
-                        print(f"    - Could not parse file {filepath}: {e}")
+                            # Process fields for classes and interfaces
+                            if isinstance(node, (javalang.tree.ClassDeclaration, javalang.tree.InterfaceDeclaration)):
+                                for field_declaration in node.fields:
+                                    field_type_node = field_declaration.type
+                                    field_type_name = field_type_node.name
+                                    is_list = field_type_name == 'List'
+
+                                    # If it's a generic type like List<SomeType>, extract 'SomeType'
+                                    if is_list and field_type_node.arguments:
+                                        type_arg = field_type_node.arguments[0].type
+                                        if type_arg:
+                                            field_type_name = type_arg.name
+
+                                    for declarator in field_declaration.declarators:
+                                        field_name = declarator.name
+                                        class_map[type_name].append(
+                                            FieldInfo(field_name, field_type_name, is_list)
+                                        )
+                    except (javalang.tokenizer.LexerError, javalang.parser.JavaSyntaxError) as e:
+                        print(f"    - FAILED to parse {file}. It likely has a syntax error.")
+                        print(f"    - Error details: {e}")
                     except Exception as e:
                         print(f"    - An unexpected error occurred with file {filepath}: {e}")
                         
-    print("\nFinished parsing. Found definitions for the following classes:")
+    print("\nFinished parsing.")
+    print("-" * 30)
+    print("Found definitions for the following classes/interfaces:")
     for cls_name in sorted(class_map.keys()):
         print(f"- {cls_name}")
+    print("\nFound definitions for the following enums (treated as terminal types):")
+    for enum_name in sorted(enum_names):
+        print(f"- {enum_name}")
     print("-" * 30)
-    return class_map
+    return class_map, enum_names
 
 def generate_getter_chains(root_class, class_map):
     """
@@ -107,28 +121,24 @@ def generate_getter_chains(root_class, class_map):
         if class_name in visited_path:
             return
 
-        # Add current class to the path for cycle detection in this branch
         visited_path.add(class_name)
-
-        # Get all fields for the current class
         fields = class_map.get(class_name, [])
 
         for field in fields:
             # Construct the getter method name, e.g., 'name' -> 'getName'
             getter_name = f"get{field.name[0].upper()}{field.name[1:]}"
             
-            # Append the getter call to the current chain
-            # If it's a list, we add a placeholder for accessing an element
+            # Append the getter call. If it's a list, add a placeholder.
             list_accessor = ".get(i)" if field.is_list else ""
             new_chain = f"{current_chain}.{getter_name}(){list_accessor}"
 
-            # If the field's type is a primitive or standard type, we're at the end of this path.
+            # If the field's type is terminal, this path ends.
             if field.type_name in TERMINAL_TYPES:
                 all_chains.append(new_chain)
-            # If the field's type is another custom class we've parsed, recurse.
+            # If it's another custom class, recurse.
             elif field.type_name in class_map:
                 find_paths(field.type_name, new_chain, visited_path.copy())
-            # Otherwise, it's an unknown type, so we treat it as a terminal path.
+            # Otherwise, it's an unknown type, treat it as a terminal path.
             else:
                 all_chains.append(new_chain)
 
@@ -143,10 +153,13 @@ def generate_getter_chains(root_class, class_map):
 def main():
     """Main function to run the script."""
     # 1. Parse all java files to understand the structure
-    class_map = parse_java_files(STUBS_DIRECTORY)
+    class_map, found_enums = parse_java_files(STUBS_DIRECTORY)
+    
+    # Add any discovered enums to the set of types that stop the chain.
+    TERMINAL_TYPES.update(found_enums)
 
     if not class_map:
-        print("\nNo classes were parsed. Please check the STUBS_DIRECTORY path.")
+        print("\nNo classes were parsed. Please check the STUBS_DIRECTORY path and ensure the Java files are syntactically correct.")
         return
 
     # 2. Generate the getter chains from the root class
@@ -159,7 +172,7 @@ def main():
             print(chain)
         print(f"\nTotal chains found: {len(getter_chains)}")
     else:
-        print("No getter chains could be generated. Check your ROOT_CLASS_NAME.")
+        print("No getter chains could be generated. Check your ROOT_CLASS_NAME and make sure the root class and its dependencies were parsed correctly.")
 
 if __name__ == '__main__':
     # Before running, make sure you have javalang installed:
