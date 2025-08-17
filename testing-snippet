@@ -181,90 +181,82 @@ class JavaStubParser:
             self.qualified_classes[class_info.qualified_name] = class_info
             return
         
-        # Parse fields with multiple patterns - IMPROVED FIELD PARSING
-        field_patterns = [
-            # Standard field declaration - more precise
-            r'(?:protected|private|public)\s+(?:static\s+)?(?:final\s+)?([A-Za-z_][\w<>,\[\]\.\s]*?)\s+(\w+)\s*[;=]',
-            # Fields with annotations
-            r'@[\w\(\)\"=,\s]*\n\s*(?:protected|private|public)\s+(?:static\s+)?(?:final\s+)?([A-Za-z_][\w<>,\[\]\.\s]*?)\s+(\w+)\s*[;=]',
-            # JAX-B and XML annotations
-            r'@XmlElement[^}]*?\n\s*(?:protected|private|public)?\s*([A-Za-z_][\w<>,\[\]\.\s]*?)\s+(\w+)\s*[;=]',
-        ]
-        
-        all_field_matches = []
-        for pattern in field_patterns:
-            matches = re.findall(pattern, class_body, re.MULTILINE | re.DOTALL)
-            all_field_matches.extend(matches)
-        
-        # Remove duplicates while preserving order
-        seen_fields = set()
-        unique_field_matches = []
-        for field_type, field_name in all_field_matches:
-            if field_name not in seen_fields and not field_name.startswith('serialVersionUID'):
-                seen_fields.add(field_name)
-                unique_field_matches.append((field_type, field_name))
-        
-        # Debug: Show field parsing for problematic classes
-        if len(unique_field_matches) > 0 and len(unique_field_matches) <= 3:
-            print(f"DEBUG FIELD PARSING for {class_name}:")
-            for field_type, field_name in unique_field_matches:
-                clean_type = self._clean_type(field_type)
-                print(f"  Raw: '{field_type}' -> Clean: '{clean_type}' -> Field: '{field_name}'")
-        
-        for field_type, field_name in unique_field_matches:
-            # Clean up the field type - IMPROVED CLEANING
-            field_type = self._clean_type(field_type)
-            class_info.fields[field_name] = field_type
+        # DEBUGGING: Show raw class body for problematic classes
+        if "CustomerProfileInfoType" in class_body or "InfoType" in class_body:
+            print(f"\n=== RAW CLASS BODY DEBUG for {class_name} ===")
+            lines = class_body.split('\n')
+            for i, line in enumerate(lines[:20], 1):  # First 20 lines
+                if 'protected' in line.lower() or 'public' in line.lower() or 'get' in line.lower():
+                    print(f"{i:2d}: {line}")
+            print("=== END RAW DEBUG ===\n")
             
-            # Check if this is a List wrapper class
-            if field_type.startswith('List<') or field_type.startswith('ArrayList<'):
-                class_info.is_list_wrapper = True
-                # Extract the element type from List<ElementType>
-                element_match = re.search(r'List<([^>]+)>', field_type)
-                if element_match:
-                    class_info.list_element_type = element_match.group(1).strip()
-                    
-        # Parse getter methods with more comprehensive patterns - IMPROVED GETTER PARSING
-        getter_patterns = [
-            # Standard getters with return type capture
-            r'(?:public|protected)\s+([A-Za-z_][\w<>,\[\]\.\s]*?)\s+(get\w+|is\w+)\s*\([^)]*\)\s*\{',
-            # Getters with annotations
-            r'@[\w\(\)\"=,\s]*\n\s*(?:public|protected)\s+([A-Za-z_][\w<>,\[\]\.\s]*?)\s+(get\w+|is\w+)\s*\([^)]*\)\s*\{',
-        ]
+        # Try multiple parsing approaches
+        print(f"PARSING {class_name} - trying different approaches:")
         
-        all_getter_matches = []
-        for pattern in getter_patterns:
-            matches = re.findall(pattern, class_body, re.MULTILINE | re.DOTALL)
-            all_getter_matches.extend(matches)
+        # Method 1: Parse from getter methods (more reliable for WSDL stubs)
+        getter_pattern = r'public\s+([A-Za-z_][\w<>,\[\]\.\s]*?)\s+(get\w+|is\w+)\s*\(\s*\)\s*\{'
+        getter_matches = re.findall(getter_pattern, class_body, re.MULTILINE)
         
-        # Remove duplicates
-        seen_getters = set()
-        unique_getter_matches = []
-        for return_type, getter_method in all_getter_matches:
-            if getter_method not in seen_getters:
-                seen_getters.add(getter_method)
-                unique_getter_matches.append((return_type, getter_method))
-        
-        # Debug: Show getter parsing for problematic classes  
-        if len(unique_getter_matches) > 0 and len(unique_getter_matches) <= 3:
-            print(f"DEBUG GETTER PARSING for {class_name}:")
-            for return_type, getter_method in unique_getter_matches:
-                clean_type = self._clean_type(return_type)
-                print(f"  Getter: '{getter_method}' -> Raw: '{return_type}' -> Clean: '{clean_type}'")
-        
-        for return_type, getter_method in unique_getter_matches:
-            return_type = self._clean_type(return_type)
-            # Infer field name from getter method
+        print(f"  Method 1 (getters): Found {len(getter_matches)} getters")
+        for return_type, getter_method in getter_matches[:3]:  # Show first 3
+            clean_type = self._clean_type(return_type)
             field_name = self._getter_to_field_name(getter_method)
+            print(f"    {getter_method} -> '{return_type}' -> cleaned: '{clean_type}'")
             
-            # Update field type if we found it through getter (getters are more reliable)
-            if field_name in class_info.fields:
-                # Use getter return type as it's usually more accurate
-                class_info.fields[field_name] = return_type
-            else:
-                class_info.fields[field_name] = return_type
-                
+            # Add to class info
+            class_info.fields[field_name] = clean_type
             class_info.getters[getter_method] = field_name
+        
+        # Method 2: Parse from field declarations
+        # Try different field patterns one by one
+        field_patterns = [
+            (r'protected\s+([A-Za-z_][\w<>,\[\]\.\s]+?)\s+(\w+)\s*;', "protected fields"),
+            (r'public\s+([A-Za-z_][\w<>,\[\]\.\s]+?)\s+(\w+)\s*;', "public fields"),
+            (r'private\s+([A-Za-z_][\w<>,\[\]\.\s]+?)\s+(\w+)\s*;', "private fields"),
+        ]
+        
+        for pattern, description in field_patterns:
+            matches = re.findall(pattern, class_body, re.MULTILINE)
+            print(f"  Method 2 ({description}): Found {len(matches)} fields")
+            for field_type, field_name in matches[:3]:  # Show first 3
+                clean_type = self._clean_type(field_type)
+                print(f"    {field_name}: '{field_type}' -> cleaned: '{clean_type}'")
+                
+                # Only add if not already added by getter (getters take precedence)
+                if field_name not in class_info.fields:
+                    class_info.fields[field_name] = clean_type
+        
+        # Method 3: Look for return statements in getters to double-check types
+        return_pattern = r'(get\w+|is\w+)\s*\(\s*\)\s*\{[^}]*?return\s+[\w\.]*?(\w+)\s*;'
+        return_matches = re.findall(return_pattern, class_body, re.MULTILINE | re.DOTALL)
+        
+        print(f"  Method 3 (return statements): Found {len(return_matches)} return patterns")
+        
+        # Method 4: Manual extraction for specific problematic cases
+        if "String" in [t for t in class_info.fields.values()]:
+            print(f"  Method 4: MANUAL CHECK for suspicious String types")
+            # Look for lines that might contain the real type
+            suspicious_lines = []
+            for line in class_body.split('\n'):
+                line = line.strip()
+                if ('protected' in line or 'public' in line) and ('String' not in line) and (';' in line):
+                    if any(word in line for word in ['Type', 'Info', 'Data', 'Response', 'Request']):
+                        suspicious_lines.append(line)
+            
+            print(f"    Found {len(suspicious_lines)} suspicious lines:")
+            for line in suspicious_lines[:5]:
+                print(f"      {line}")
+                
+                # Try to extract type from these lines
+                manual_match = re.search(r'(protected|public|private)\s+([A-Za-z_][\w<>,\[\]\.\s]+?)\s+(\w+)\s*[;=]', line)
+                if manual_match:
+                    visibility, field_type, field_name = manual_match.groups()
+                    clean_type = self._clean_type(field_type)
+                    print(f"        -> Manual extract: {field_name} = '{clean_type}'")
+                    # Override the incorrect String type
+                    if field_name in class_info.fields and class_info.fields[field_name] == "String":
+                        print(f"        -> CORRECTING {field_name} from String to {clean_type}")
+                        class_info.fields[field_name] = clean_type
             
         self.classes[class_name] = class_info
         self.qualified_classes[class_info.qualified_name] = class_info
