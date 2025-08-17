@@ -1,0 +1,167 @@
+import os
+import javalang
+from collections import defaultdict
+
+# --- Configuration ---
+# TODO: Set the path to the folder containing your Java stub classes.
+STUBS_DIRECTORY = './stubs'  # <-- IMPORTANT: CHANGE THIS PATH
+# TODO: Set the name of the root class from which to start parsing.
+ROOT_CLASS_NAME = 'RootObject'  # <-- IMPORTANT: CHANGE THIS
+# The variable name to use for the root object in the generated chains.
+ROOT_OBJECT_VARIABLE = 'rootObject'
+
+# A set of types that should be considered "terminal". 
+# The script will not try to find getters in these. Add any other primitive
+# or standard library types you encounter.
+TERMINAL_TYPES = {
+    'String', 'int', 'Integer', 'long', 'Long', 'double', 'Double',
+    'boolean', 'Boolean', 'BigDecimal', 'XMLGregorianCalendar', 'Object'
+}
+
+class FieldInfo:
+    """A simple class to hold information about a class field."""
+    def __init__(self, name, type_name, is_list=False):
+        self.name = name
+        self.type_name = type_name
+        self.is_list = is_list
+
+    def __repr__(self):
+        list_str = "List of " if self.is_list else ""
+        return f"Field(name={self.name}, type={list_str}{self.type_name})"
+
+def parse_java_files(directory):
+    """
+    Parses all .java files in a directory and builds a map of classes and their fields.
+
+    Args:
+        directory (str): The path to the directory containing .java files.
+
+    Returns:
+        dict: A dictionary mapping class names to a list of FieldInfo objects.
+    """
+    class_map = defaultdict(list)
+    if not os.path.isdir(directory):
+        print(f"Error: Directory not found at '{directory}'")
+        return class_map
+
+    print(f"Scanning for .java files in '{directory}'...")
+    for root, _, files in os.walk(directory):
+        for file in files:
+            if file.endswith('.java'):
+                filepath = os.path.join(root, file)
+                print(f"  Parsing: {filepath}")
+                with open(filepath, 'r', encoding='utf-8') as f:
+                    try:
+                        content = f.read()
+                        tree = javalang.parse.parse(content)
+                        
+                        # Find class or interface declarations
+                        for _, node in tree.filter(javalang.tree.ClassDeclaration):
+                            class_name = node.name
+                            for field_declaration in node.fields:
+                                field_type_node = field_declaration.type
+                                field_type_name = field_type_node.name
+                                is_list = field_type_name == 'List'
+
+                                # If it's a generic type like List<SomeType>, extract 'SomeType'
+                                if is_list and field_type_node.arguments:
+                                    # Assuming single type argument, e.g., List<Address>
+                                    type_arg = field_type_node.arguments[0].type
+                                    if type_arg:
+                                        field_type_name = type_arg.name
+
+                                for declarator in field_declaration.declarators:
+                                    field_name = declarator.name
+                                    class_map[class_name].append(
+                                        FieldInfo(field_name, field_type_name, is_list)
+                                    )
+                    except javalang.tokenizer.LexerError as e:
+                        print(f"    - Could not lex file {filepath}: {e}")
+                    except javalang.parser.JavaSyntaxError as e:
+                        print(f"    - Could not parse file {filepath}: {e}")
+                    except Exception as e:
+                        print(f"    - An unexpected error occurred with file {filepath}: {e}")
+                        
+    print("\nFinished parsing. Found definitions for the following classes:")
+    for cls_name in sorted(class_map.keys()):
+        print(f"- {cls_name}")
+    print("-" * 30)
+    return class_map
+
+def generate_getter_chains(root_class, class_map):
+    """
+    Generates all possible getter chains starting from a root class.
+
+    Args:
+        root_class (str): The name of the starting class.
+        class_map (dict): The map of classes and their fields.
+
+    Returns:
+        list: A list of strings, where each string is a complete getter chain.
+    """
+    all_chains = []
+
+    # A recursive DFS function to explore the class graph
+    def find_paths(class_name, current_chain, visited_path):
+        # Cycle detection: if we've seen this class in this specific path, stop.
+        if class_name in visited_path:
+            return
+
+        # Add current class to the path for cycle detection in this branch
+        visited_path.add(class_name)
+
+        # Get all fields for the current class
+        fields = class_map.get(class_name, [])
+
+        for field in fields:
+            # Construct the getter method name, e.g., 'name' -> 'getName'
+            getter_name = f"get{field.name[0].upper()}{field.name[1:]}"
+            
+            # Append the getter call to the current chain
+            # If it's a list, we add a placeholder for accessing an element
+            list_accessor = ".get(i)" if field.is_list else ""
+            new_chain = f"{current_chain}.{getter_name}(){list_accessor}"
+
+            # If the field's type is a primitive or standard type, we're at the end of this path.
+            if field.type_name in TERMINAL_TYPES:
+                all_chains.append(new_chain)
+            # If the field's type is another custom class we've parsed, recurse.
+            elif field.type_name in class_map:
+                find_paths(field.type_name, new_chain, visited_path.copy())
+            # Otherwise, it's an unknown type, so we treat it as a terminal path.
+            else:
+                all_chains.append(new_chain)
+
+    print(f"\nGenerating getter chains starting from root: '{root_class}'\n")
+    if root_class not in class_map:
+        print(f"Error: Root class '{root_class}' not found in parsed files.")
+        return []
+        
+    find_paths(root_class, ROOT_OBJECT_VARIABLE, set())
+    return all_chains
+
+def main():
+    """Main function to run the script."""
+    # 1. Parse all java files to understand the structure
+    class_map = parse_java_files(STUBS_DIRECTORY)
+
+    if not class_map:
+        print("\nNo classes were parsed. Please check the STUBS_DIRECTORY path.")
+        return
+
+    # 2. Generate the getter chains from the root class
+    getter_chains = generate_getter_chains(ROOT_CLASS_NAME, class_map)
+
+    # 3. Print the results
+    if getter_chains:
+        print("--- Found Getter Chains ---")
+        for chain in sorted(getter_chains):
+            print(chain)
+        print(f"\nTotal chains found: {len(getter_chains)}")
+    else:
+        print("No getter chains could be generated. Check your ROOT_CLASS_NAME.")
+
+if __name__ == '__main__':
+    # Before running, make sure you have javalang installed:
+    # pip install javalang
+    main()
