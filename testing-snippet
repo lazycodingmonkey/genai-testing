@@ -293,6 +293,8 @@ class JavaStubParser:
                     match = re.search(r'List<(.+?)>', field_type)
                     if match:
                         element_type = match.group(1)
+                        # NEW: Debug print to show the element type being resolved
+                        print(f"    - Attempting to resolve List element type: '{element_type}' from '{current_info.qualified_name}'")
                         element_info = self._find_class_info(element_type, current_info)
                         if element_info:
                             indexed_chain = new_chain + ".get(i)"
