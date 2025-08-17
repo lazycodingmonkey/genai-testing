@@ -9,6 +9,9 @@ STUBS_DIRECTORY = './stubs'  # <-- IMPORTANT: CHANGE THIS PATH
 ROOT_CLASS_NAME = 'RootObject'  # <-- IMPORTANT: CHANGE THIS
 # The variable name to use for the root object in the generated chains.
 ROOT_OBJECT_VARIABLE = 'rootObject'
+# NEW: Set a max depth to prevent hanging on very complex object graphs.
+# You can increase this if you need deeper chains.
+MAX_DEPTH = 15
 
 # A set of types that should be considered "terminal". 
 # The script will not try to find getters in these. 
@@ -116,7 +119,12 @@ def generate_getter_chains(root_class, class_map):
     all_chains = []
 
     # A recursive DFS function to explore the class graph
-    def find_paths(class_name, current_chain, visited_path):
+    def find_paths(class_name, current_chain, visited_path, depth):
+        # Stop recursion if we hit the max depth to prevent hanging
+        if depth >= MAX_DEPTH:
+            all_chains.append(f"{current_chain}.<... max depth reached ...>")
+            return
+            
         # Cycle detection: if we've seen this class in this specific path, stop.
         if class_name in visited_path:
             return
@@ -130,24 +138,25 @@ def generate_getter_chains(root_class, class_map):
             
             # Append the getter call. If it's a list, add a placeholder.
             list_accessor = ".get(i)" if field.is_list else ""
-            new_chain = f"{current_chain}.{getter_name}(){list_accessor}"
+            new_chain = f"{current_chain}..{getter_name}(){list_accessor}"
 
             # If the field's type is terminal, this path ends.
             if field.type_name in TERMINAL_TYPES:
                 all_chains.append(new_chain)
             # If it's another custom class, recurse.
             elif field.type_name in class_map:
-                find_paths(field.type_name, new_chain, visited_path.copy())
+                find_paths(field.type_name, new_chain, visited_path.copy(), depth + 1)
             # Otherwise, it's an unknown type, treat it as a terminal path.
             else:
                 all_chains.append(new_chain)
 
-    print(f"\nGenerating getter chains starting from root: '{root_class}'\n")
+    print(f"\nGenerating getter chains starting from root: '{root_class}' (max depth: {MAX_DEPTH})\n")
     if root_class not in class_map:
         print(f"Error: Root class '{root_class}' not found in parsed files.")
         return []
         
-    find_paths(root_class, ROOT_OBJECT_VARIABLE, set())
+    # Start the recursion with initial depth 0
+    find_paths(root_class, ROOT_OBJECT_VARIABLE, set(), 0)
     return all_chains
 
 def main():
