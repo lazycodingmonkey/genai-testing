@@ -49,6 +49,7 @@ class JavaStubParser:
             return
 
         for file_path in java_files:
+            print(f"\n--- Reading file: {os.path.basename(file_path)} ---")
             try:
                 self._parse_single_file(file_path)
             except Exception as e:
@@ -90,15 +91,24 @@ class JavaStubParser:
         # Remove comments and clean up
         content = self._remove_comments(content)
 
-        # Extract class definitions - more flexible regex
+        # Extract class definitions - MORE ROBUST REGEX
         class_matches = re.finditer(
-            r'public\s+(?:abstract\s+)?(?:final\s+)?(?:class|enum|interface)\s+(\w+)(?:\s+extends\s+\w+)?(?:\s+implements\s+[\w,\s]+)?\s*{',
-            content, re.MULTILINE
+            r'[\s\n](?:public|private|protected|abstract|final)?\s*(?:class|enum|interface)\s+(\w+)(?:\s+extends\s+[\w\.\s]+)?(?:\s+implements\s+[\w\.\s,]+)?\s*{',
+            content, re.MULTILINE | re.DOTALL
+        )
+        
+        found_classes = [match.group(1) for match in class_matches]
+        
+        # Reset the iterator for the actual parsing loop
+        class_matches = re.finditer(
+            r'[\s\n](?:public|private|protected|abstract|final)?\s*(?:class|enum|interface)\s+(\w+)(?:\s+extends\s+[\w\.\s]+)?(?:\s+implements\s+[\w\.\s,]+)?\s*{',
+            content, re.MULTILINE | re.DOTALL
         )
 
         for match in class_matches:
             class_name = match.group(1)
             class_start = match.start()
+            print(f"  - Parsing class: '{class_name}'")
 
             # Find the class body
             class_body = self._extract_class_body(content, class_start)
@@ -320,8 +330,6 @@ class JavaStubParser:
                     match = re.search(r'List<(.+?)>', field_type)
                     if match:
                         element_type = match.group(1)
-                        # NEW: Debug print to show the element type being resolved
-                        print(f"    - Attempting to resolve List element type: '{element_type}' from '{current_info.qualified_name}'")
                         element_info = self._find_class_info(element_type, current_info)
                         if element_info:
                             indexed_chain = new_chain + ".get(i)"
