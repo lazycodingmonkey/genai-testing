@@ -37,83 +37,26 @@ class JavaStubParser:
         """Parse all Java files in the stub folder and all subdirectories"""
         print(f"Parsing Java files recursively in: {self.stub_folder_path}")
         
-        # Debug: Show directory structure
-        print(f"Directory exists: {os.path.exists(self.stub_folder_path)}")
-        print(f"Directory is readable: {os.access(self.stub_folder_path, os.R_OK)}")
-        
-        # Collect all Java files with detailed logging
         java_files = []
-        directories_scanned = 0
-        
-        print(f"\nScanning directory structure:")
         for root, dirs, files in os.walk(self.stub_folder_path):
-            directories_scanned += 1
-            java_files_in_dir = [f for f in files if f.endswith('.java')]
+            java_files_in_dir = [os.path.join(root, f) for f in files if f.endswith('.java')]
+            java_files.extend(java_files_in_dir)
             
-            if java_files_in_dir or directories_scanned <= 10:  # Show first 10 dirs or dirs with Java files
-                relative_path = os.path.relpath(root, self.stub_folder_path)
-                print(f"  {relative_path}: {len(java_files_in_dir)} Java files {java_files_in_dir[:3]}")
-            
-            for file in java_files_in_dir:
-                file_path = os.path.join(root, file)
-                java_files.append(file_path)
-        
-        print(f"\nSUMMARY:")
-        print(f"Directories scanned: {directories_scanned}")
         print(f"Total Java files found: {len(java_files)}")
         
-        if len(java_files) < 20:  # Show all files if few found
-            print(f"All Java files found:")
-            for i, file_path in enumerate(java_files, 1):
-                rel_path = os.path.relpath(file_path, self.stub_folder_path)
-                print(f"  {i:2d}. {rel_path}")
-        else:
-            print(f"Sample Java files found:")
-            for i, file_path in enumerate(java_files[:10], 1):
-                rel_path = os.path.relpath(file_path, self.stub_folder_path)
-                print(f"  {i:2d}. {rel_path}")
-            print(f"  ... and {len(java_files) - 10} more")
-        
-        if len(java_files) == 0:
+        if not java_files:
             print(f"ERROR: No Java files found in {self.stub_folder_path}")
-            print(f"Please check:")
-            print(f"1. The path is correct")
-            print(f"2. The directory contains .java files")
-            print(f"3. You have read permissions")
             return
-        
-        # Parse all found files
-        print(f"\nParsing {len(java_files)} Java files...")
-        parsed_successfully = 0
-        
-        for i, file_path in enumerate(java_files, 1):
-            try:
-                if i <= 5 or i % 50 == 0:  # Show progress for first 5 and every 50th
-                    rel_path = os.path.relpath(file_path, self.stub_folder_path)
-                    print(f"  Parsing {i:3d}/{len(java_files)}: {rel_path}")
-                
-                self._parse_single_file(file_path)
-                parsed_successfully += 1
-            except Exception as e:
-                rel_path = os.path.relpath(file_path, self.stub_folder_path)
-                print(f"  ERROR parsing {rel_path}: {e}")
-        
-        # Build lookup maps for type resolution
-        self._build_type_lookup_maps()
-        
-        print(f"\nPARSING RESULTS:")
-        print(f"Java files found: {len(java_files)}")
-        print(f"Files parsed successfully: {parsed_successfully}")
-        print(f"Classes extracted: {len(self.classes)}")
-        print(f"Unique packages: {len(set(info.package for info in self.classes.values() if info.package))}")
-        
-        if parsed_successfully < len(java_files):
-            print(f"WARNING: {len(java_files) - parsed_successfully} files failed to parse")
             
-        if len(self.classes) == 0:
-            print(f"ERROR: No classes were extracted from the Java files")
-            print(f"This might indicate a parsing issue or the files don't contain standard Java classes")
+        for file_path in java_files:
+            try:
+                self._parse_single_file(file_path)
+            except Exception as e:
+                print(f"ERROR parsing {file_path}: {e}")
         
+        self._build_type_lookup_maps()
+        print(f"Classes extracted: {len(self.classes)}")
+            
     def _parse_single_file(self, file_path: str):
         """Parse a single Java file"""
         with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
@@ -130,9 +73,9 @@ class JavaStubParser:
         # Remove comments and clean up
         content = self._remove_comments(content)
         
-        # Extract class definitions
+        # Extract class definitions - more flexible regex
         class_matches = re.finditer(
-            r'(?:public\s+)?(?:class|enum|interface)\s+(\w+)(?:\s+extends\s+\w+)?(?:\s+implements\s+[\w,\s]+)?\s*{',
+            r'public\s+(?:abstract\s+)?(?:final\s+)?(?:class|enum|interface)\s+(\w+)(?:\s+extends\s+\w+)?(?:\s+implements\s+[\w,\s]+)?\s*{',
             content, re.MULTILINE
         )
         
@@ -147,9 +90,7 @@ class JavaStubParser:
                 
     def _remove_comments(self, content: str) -> str:
         """Remove Java comments from content"""
-        # Remove single line comments
         content = re.sub(r'//.*$', '', content, flags=re.MULTILINE)
-        # Remove multi-line comments
         content = re.sub(r'/\*.*?\*/', '', content, flags=re.DOTALL)
         return content
         
@@ -174,138 +115,84 @@ class JavaStubParser:
         class_info = self.ClassInfo(class_name, package_name)
         class_info.imports = imports or set()
         
-        # Check if it's an enum
         if 'enum ' + class_name in full_content:
             class_info.is_enum = True
             self.classes[class_name] = class_info
             self.qualified_classes[class_info.qualified_name] = class_info
             return
-        
-        # DEBUGGING: Show raw class body for problematic classes
-        if "CustomerProfileInfoType" in class_body or "InfoType" in class_body:
-            print(f"\n=== RAW CLASS BODY DEBUG for {class_name} ===")
-            lines = class_body.split('\n')
-            for i, line in enumerate(lines[:20], 1):  # First 20 lines
-                if 'protected' in line.lower() or 'public' in line.lower() or 'get' in line.lower():
-                    print(f"{i:2d}: {line}")
-            print("=== END RAW DEBUG ===\n")
             
-        # Try multiple parsing approaches
-        print(f"PARSING {class_name} - trying different approaches:")
+        # Method 1: Parse from getter methods (most reliable for WSDL stubs)
+        getter_pattern = r'public\s+([A-Za-z_][\w<>,\[\]\.\s]*?)\s+(get\w+|is\w+)\s*\(\s*\)\s*\{[^}]*return\s+[^;]*;'
+        getter_matches = re.findall(getter_pattern, class_body, re.MULTILINE | re.DOTALL)
         
-        # Method 1: Parse from getter methods (more reliable for WSDL stubs)
-        getter_pattern = r'public\s+([A-Za-z_][\w<>,\[\]\.\s]*?)\s+(get\w+|is\w+)\s*\(\s*\)\s*\{'
-        getter_matches = re.findall(getter_pattern, class_body, re.MULTILINE)
-        
-        print(f"  Method 1 (getters): Found {len(getter_matches)} getters")
-        for return_type, getter_method in getter_matches[:3]:  # Show first 3
+        for return_type, getter_method in getter_matches:
             clean_type = self._clean_type(return_type)
             field_name = self._getter_to_field_name(getter_method)
-            print(f"    {getter_method} -> '{return_type}' -> cleaned: '{clean_type}'")
-            
-            # Add to class info
             class_info.fields[field_name] = clean_type
             class_info.getters[getter_method] = field_name
-        
-        # Method 2: Parse from field declarations
-        # Try different field patterns one by one
-        field_patterns = [
-            (r'protected\s+([A-Za-z_][\w<>,\[\]\.\s]+?)\s+(\w+)\s*;', "protected fields"),
-            (r'public\s+([A-Za-z_][\w<>,\[\]\.\s]+?)\s+(\w+)\s*;', "public fields"),
-            (r'private\s+([A-Za-z_][\w<>,\[\]\.\s]+?)\s+(\w+)\s*;', "private fields"),
-        ]
-        
-        for pattern, description in field_patterns:
-            matches = re.findall(pattern, class_body, re.MULTILINE)
-            print(f"  Method 2 ({description}): Found {len(matches)} fields")
-            for field_type, field_name in matches[:3]:  # Show first 3
+            
+        # Method 2: Fallback to field declarations if no getters found
+        if not class_info.fields:
+            field_pattern = r'(?:protected|public|private)\s+([A-Za-z_][\w<>,\[\]\.\s]+?)\s+(\w+)\s*;'
+            field_matches = re.findall(field_pattern, class_body, re.MULTILINE)
+            for field_type, field_name in field_matches:
                 clean_type = self._clean_type(field_type)
-                print(f"    {field_name}: '{field_type}' -> cleaned: '{clean_type}'")
-                
-                # Only add if not already added by getter (getters take precedence)
-                if field_name not in class_info.fields:
-                    class_info.fields[field_name] = clean_type
+                class_info.fields[field_name] = clean_type
+
+        # Check for list wrapper pattern
+        if len(class_info.fields) == 1:
+            field_name, field_type = list(class_info.fields.items())[0]
+            if "List<" in field_type:
+                class_info.is_list_wrapper = True
+                match = re.search(r'List<(.+?)>', field_type)
+                if match:
+                    class_info.list_element_type = self._clean_type(match.group(1))
         
-        # Method 3: Look for return statements in getters to double-check types
-        return_pattern = r'(get\w+|is\w+)\s*\(\s*\)\s*\{[^}]*?return\s+[\w\.]*?(\w+)\s*;'
-        return_matches = re.findall(return_pattern, class_body, re.MULTILINE | re.DOTALL)
-        
-        print(f"  Method 3 (return statements): Found {len(return_matches)} return patterns")
-        
-        # Method 4: Manual extraction for specific problematic cases
-        if "String" in [t for t in class_info.fields.values()]:
-            print(f"  Method 4: MANUAL CHECK for suspicious String types")
-            # Look for lines that might contain the real type
-            suspicious_lines = []
-            for line in class_body.split('\n'):
-                line = line.strip()
-                if ('protected' in line or 'public' in line) and ('String' not in line) and (';' in line):
-                    if any(word in line for word in ['Type', 'Info', 'Data', 'Response', 'Request']):
-                        suspicious_lines.append(line)
-            
-            print(f"    Found {len(suspicious_lines)} suspicious lines:")
-            for line in suspicious_lines[:5]:
-                print(f"      {line}")
-                
-                # Try to extract type from these lines
-                manual_match = re.search(r'(protected|public|private)\s+([A-Za-z_][\w<>,\[\]\.\s]+?)\s+(\w+)\s*[;=]', line)
-                if manual_match:
-                    visibility, field_type, field_name = manual_match.groups()
-                    clean_type = self._clean_type(field_type)
-                    print(f"        -> Manual extract: {field_name} = '{clean_type}'")
-                    # Override the incorrect String type
-                    if field_name in class_info.fields and class_info.fields[field_name] == "String":
-                        print(f"        -> CORRECTING {field_name} from String to {clean_type}")
-                        class_info.fields[field_name] = clean_type
-            
         self.classes[class_name] = class_info
         self.qualified_classes[class_info.qualified_name] = class_info
-        
+            
     def _clean_type(self, type_str: str) -> str:
         """Clean up Java type string - IMPROVED VERSION"""
         if not type_str:
             return type_str
-            
-        # Remove extra whitespace and newlines
-        type_str = ' '.join(type_str.split())
         
-        # Handle generic types properly
-        type_str = type_str.replace(' <', '<').replace('< ', '<').replace(' >', '>')
-        type_str = type_str.replace(' ,', ',').replace(', ', ',')
-        
-        # Remove common annotations that might be mixed in
+        # Remove annotations
         type_str = re.sub(r'@\w+(\([^)]*\))?\s*', '', type_str)
+        # Handle JAXBElement wrapper
+        jaxb_match = re.search(r'JAXBElement<(.*?)>', type_str)
+        if jaxb_match:
+            type_str = jaxb_match.group(1).strip()
+        # Handle List generic type
+        list_match = re.search(r'(List|ArrayList)<(.+?)>', type_str)
+        if list_match:
+            element_type = self._clean_type(list_match.group(2))
+            return f"List<{element_type}>"
+        # Handle namespace prefixes (e.g., "ns1:CustomerType")
+        if ':' in type_str:
+            type_str = type_str.split(':')[-1]
+            
+        type_str = re.sub(r'\s+', '', type_str).strip()
         
-        # Remove 'final', 'static' keywords that might have been captured
-        type_str = re.sub(r'\b(final|static)\s+', '', type_str)
-        
-        # Handle array notation
-        type_str = type_str.replace('[ ]', '[]').replace(' []', '[]')
-        
-        # Clean up any remaining extra spaces
-        type_str = re.sub(r'\s+', ' ', type_str).strip()
-        
-        # Common problematic patterns in WSDL-generated code
-        # Remove namespace prefixes that might be captured (like "ns1:CustomerType" -> "CustomerType")
-        if ':' in type_str and not type_str.startswith('http'):  # Don't remove from URLs
-            parts = type_str.split(':')
-            if len(parts) == 2 and not parts[0].endswith('//'):  # Not a URL
-                type_str = parts[1]
-        
-        return type_str.strip()
+        return type_str
         
     def _getter_to_field_name(self, getter_method: str) -> str:
         """Convert getter method name to field name"""
         if getter_method.startswith('get'):
-            field_name = getter_method[3:]  # Remove 'get'
+            field_name = getter_method[3:]
         elif getter_method.startswith('is'):
-            field_name = getter_method[2:]   # Remove 'is'
+            field_name = getter_method[2:]
         else:
             field_name = getter_method
             
-        # Convert first letter to lowercase
         if field_name:
             field_name = field_name[0].lower() + field_name[1:]
+            
+        # Remove any leading `_` that might be present
+        if field_name.startswith('_'):
+            field_name = field_name[1:]
+            
+        return field_name
+            
     def _build_type_lookup_maps(self):
         """Build lookup maps for resolving types across packages"""
         for class_info in self.classes.values():
@@ -314,167 +201,93 @@ class JavaStubParser:
                 self.class_name_to_qualified[simple_name] = []
             self.class_name_to_qualified[simple_name].append(class_info.qualified_name)
     
-    def _resolve_type(self, type_name: str, current_class_info: 'ClassInfo' = None) -> str:
-        """Resolve a type name to its fully qualified name"""
-        # Remove generic parameters for resolution
+    def _find_class_info(self, type_name: str, current_class_info: 'ClassInfo' = None) -> Optional['ClassInfo']:
+        """Find ClassInfo for a given type name using a more robust search strategy"""
         base_type = re.sub(r'<.*>', '', type_name).strip()
         
-        # If already qualified or primitive, return as is
-        if '.' in base_type or base_type in self.primitive_types:
-            return type_name
-            
-        # Try exact match first
-        if base_type in self.classes:
-            return type_name
-            
-        # Look for the type in qualified classes
-        if base_type in self.class_name_to_qualified:
-            candidates = self.class_name_to_qualified[base_type]
-            
-            # If current class info is available, prefer same package
-            if current_class_info and current_class_info.package:
-                same_package_candidate = f"{current_class_info.package}.{base_type}"
-                if same_package_candidate in candidates:
-                    return type_name  # Use simple name but we know it resolves
-                    
-                # Check imports
-                for import_name in current_class_info.imports:
-                    if import_name.endswith('.' + base_type) and import_name in candidates:
-                        return type_name  # Use simple name but we know it resolves
-            
-            # If only one candidate, use it
-            if len(candidates) == 1:
-                return type_name
-                
-        return type_name  # Return as-is if can't resolve
-    
-    def _find_class_info(self, type_name: str, current_class_info: 'ClassInfo' = None) -> 'ClassInfo':
-        """Find ClassInfo for a given type name"""
-        base_type = re.sub(r'<.*>', '', type_name).strip()
-        
-        # Try simple name first
+        # 1. Direct match (simple name)
         if base_type in self.classes:
             return self.classes[base_type]
             
-        # Try qualified lookup
+        # 2. Check imports
+        if current_class_info:
+            for import_name in current_class_info.imports:
+                if import_name.endswith('.' + base_type) and import_name in self.qualified_classes:
+                    return self.qualified_classes[import_name]
+        
+        # 3. Check same package
+        if current_class_info and current_class_info.package:
+            qualified_name = f"{current_class_info.package}.{base_type}"
+            if qualified_name in self.qualified_classes:
+                return self.qualified_classes[qualified_name]
+                
+        # 4. Check all qualified candidates (multiple classes with same simple name)
         if base_type in self.class_name_to_qualified:
             candidates = self.class_name_to_qualified[base_type]
-            
-            if current_class_info:
-                # Prefer same package
-                same_package = f"{current_class_info.package}.{base_type}"
-                if same_package in self.qualified_classes:
-                    return self.qualified_classes[same_package]
-                    
-                # Check imports
-                for import_name in current_class_info.imports:
-                    if import_name.endswith('.' + base_type) and import_name in self.qualified_classes:
-                        return self.qualified_classes[import_name]
-            
-            # Return first candidate if available
-            if candidates and candidates[0] in self.qualified_classes:
-                return self.qualified_classes[candidates[0]]
-                
+            if len(candidates) == 1:
+                return self.qualified_classes.get(candidates[0])
+            # Ambiguous case, requires more context, which we don't have. Return first candidate.
+            if candidates:
+                 return self.qualified_classes.get(candidates[0])
+
         return None
         
     def generate_getter_chains(self, root_class_name: str, max_depth: int = 10):
-        """Generate all possible getter chains from the root class"""
-        print(f"Generating getter chains for root class: {root_class_name}")
-        
+        """Generate all possible getter chains from the root class using BFS"""
         if root_class_name not in self.classes:
-            print(f"Root class {root_class_name} not found!")
+            print(f"Root class '{root_class_name}' not found!")
             return []
             
-        visited = set()
-        all_chains = []
+        root_info = self.classes[root_class_name]
+        all_chains = set()
+        queue = deque([(root_info, "", 0)])  # (current_class_info, current_chain_prefix, depth)
         
-        def dfs(current_class: str, chain: List[str], depth: int):
-            if depth > max_depth or current_class in visited:
-                return
-                
-            if current_class not in self.classes:
-                print(f"DEBUG: Class '{current_class}' not found in parsed classes")
-                # Try to find it using the new type resolution
-                class_info = self._find_class_info(current_class, self.classes.get(root_class_name))
-                if not class_info:
-                    return
-            else:
-                class_info = self.classes[current_class]
-                
-            visited.add(current_class)
+        print(f"Starting BFS for getter chains from '{root_class_name}'...")
+        
+        while queue:
+            current_info, current_chain, depth = queue.popleft()
             
-            print(f"DEBUG: Processing class '{current_class}' at depth {depth}, getters: {list(class_info.getters.keys())}")
-            
-            # Add current chain if it's not empty
-            if chain:
-                all_chains.append(chain.copy())
-            
-            # Explore each field/getter
-            for getter_method, field_name in class_info.getters.items():
-                field_type = class_info.fields.get(field_name, '')
-                print(f"DEBUG: Getter '{getter_method}' -> field '{field_name}' -> type '{field_type}'")
+            if depth >= max_depth:
+                continue
                 
-                # Handle List types
+            for getter_method, field_name in current_info.getters.items():
+                field_type = current_info.fields.get(field_name)
+                
+                if not field_type:
+                    continue
+                    
+                new_chain_part = f".{getter_method}()" if current_chain else f"{getter_method}()"
+                new_chain = current_chain + new_chain_part
+
+                all_chains.add(new_chain)
+
+                # Handle List and ArrayList types
                 if field_type.startswith('List<') or field_type.startswith('ArrayList<'):
-                    element_type = re.search(r'List<([^>]+)>', field_type)
-                    if element_type:
-                        element_class = element_type.group(1).strip()
-                        print(f"DEBUG: Found list element type: '{element_class}'")
-                        new_chain = chain + [f"{getter_method}()"]
-                        all_chains.append(new_chain.copy())
-                        
-                        # Add indexed access for list elements
-                        indexed_chain = chain + [f"{getter_method}().get(i)"]
-                        all_chains.append(indexed_chain.copy())
-                        
-                        # Continue with the element type
-                        if element_class not in self.primitive_types:
-                            element_class_info = self._find_class_info(element_class, class_info)
-                            if element_class_info:
-                                print(f"DEBUG: Continuing DFS with element class '{element_class}'")
-                                dfs(element_class_info.name, indexed_chain, depth + 1)
-                            else:
-                                print(f"DEBUG: Element class '{element_class}' not found")
+                    match = re.search(r'List<(.+?)>', field_type)
+                    if match:
+                        element_type = match.group(1)
+                        element_info = self._find_class_info(element_type, current_info)
+                        if element_info:
+                            # Add a chain with indexed access
+                            indexed_chain = new_chain + ".get(i)"
+                            all_chains.add(indexed_chain)
+                            # Add the nested object to the queue for further exploration
+                            queue.append((element_info, indexed_chain, depth + 1))
                         else:
-                            print(f"DEBUG: Element class '{element_class}' is primitive")
-                
+                            # Primitive or un-parsed list element type
+                            continue
+
                 # Handle regular object types
-                elif field_type not in self.primitive_types:
-                    target_class_info = self._find_class_info(field_type, class_info)
-                    if target_class_info:
-                        print(f"DEBUG: Found complex type '{field_type}', continuing DFS")
-                        new_chain = chain + [f"{getter_method}()"]
-                        dfs(target_class_info.name, new_chain, depth + 1)
-                    else:
-                        print(f"DEBUG: Type '{field_type}' not found - might be missing from parsed classes")
-                
-                # Handle primitive types (end of chain)
-                elif field_type in self.primitive_types:
-                    primitive_chain = chain + [f"{getter_method}()"]
-                    all_chains.append(primitive_chain.copy())
-                    print(f"DEBUG: Added primitive chain: {primitive_chain}")
                 else:
-                    print(f"DEBUG: Type '{field_type}' not found - might be missing from parsed classes")
-            
-            visited.remove(current_class)
+                    target_class_info = self._find_class_info(field_type, current_info)
+                    if target_class_info:
+                        queue.append((target_class_info, new_chain, depth + 1))
+
+        formatted_chains = [f"rootObject.{chain}" for chain in all_chains]
         
-        # Start DFS from root
-        dfs(root_class_name, [], 0)
-        
-        # Clean up and format chains
-        formatted_chains = []
-        for chain in all_chains:
-            if chain:  # Skip empty chains
-                chain_str = "rootObject." + ".".join(chain)
-                formatted_chains.append(chain_str)
-                
-        # Remove duplicates and sort
-        formatted_chains = list(set(formatted_chains))
-        formatted_chains.sort()
-        
-        self.getter_chains[root_class_name] = formatted_chains
-        return formatted_chains
-        
+        self.getter_chains[root_class_name] = sorted(list(set(formatted_chains)))
+        return self.getter_chains[root_class_name]
+
     def export_results(self, output_file: str = "getter_chains_analysis.json"):
         """Export the analysis results to a JSON file"""
         results = {
@@ -486,7 +299,6 @@ class JavaStubParser:
             }
         }
         
-        # Export class information
         for class_name, class_info in self.classes.items():
             results["classes"][class_name] = {
                 "fields": class_info.fields,
@@ -497,185 +309,4 @@ class JavaStubParser:
             }
             
         with open(output_file, 'w', encoding='utf-8') as f:
-            json.dump(results, f, indent=2, ensure_ascii=False)
-            
-        print(f"Results exported to: {output_file}")
-        
-    def print_analysis_summary(self):
-        """Print a summary of the analysis"""
-        print("\n" + "="*60)
-        print("JAVA STUB ANALYSIS SUMMARY")
-        print("="*60)
-        print(f"Total Classes Parsed: {len(self.classes)}")
-        
-        enum_count = sum(1 for c in self.classes.values() if c.is_enum)
-        list_wrapper_count = sum(1 for c in self.classes.values() if c.is_list_wrapper)
-        
-        print(f"Enum Classes: {enum_count}")
-        print(f"List Wrapper Classes: {list_wrapper_count}")
-        print(f"Regular Classes: {len(self.classes) - enum_count - list_wrapper_count}")
-        
-        # Only show getter chains if they exist
-        if self.getter_chains:
-            for root_class, chains in self.getter_chains.items():
-                chain_count = len(chains) if chains else 0
-                print(f"\nGetter Chains for {root_class}: {chain_count} chains found")
-            
-    def find_root_classes(self) -> List[str]:
-        """Identify potential root classes (classes that are not referenced as field types)"""
-        referenced_types = set()
-        
-        for class_info in self.classes.values():
-            for field_type in class_info.fields.values():
-                # Extract base type from generic types
-                base_type = re.sub(r'<.*>', '', field_type).strip()
-                referenced_types.add(base_type)
-                
-        # Root classes are those not referenced as field types
-        root_candidates = []
-        for class_name in self.classes.keys():
-            if class_name not in referenced_types:
-                root_candidates.append(class_name)
-                
-        return root_candidates
-
-
-def main():
-    # Configuration
-    STUB_FOLDER_PATH = input("Enter the path to your Java stub folder: ").strip()
-    
-    if not os.path.exists(STUB_FOLDER_PATH):
-        print(f"Error: Path '{STUB_FOLDER_PATH}' does not exist!")
-        return
-        
-    # Initialize parser
-    parser = JavaStubParser(STUB_FOLDER_PATH)
-    
-    # Parse all Java files
-    parser.parse_java_files()
-    
-    # Enhanced Debug: Show comprehensive parsing results
-    print(f"\nDETAILED PARSING RESULTS:")
-    print(f"Total Java files found: {sum(1 for root, dirs, files in os.walk(parser.stub_folder_path) for file in files if file.endswith('.java'))}")
-    print(f"Total classes parsed: {len(parser.classes)}")
-    print(f"Packages found: {len(set(info.package for info in parser.classes.values() if info.package))}")
-    
-    # Show sample classes from different packages
-    packages = {}
-    for class_info in parser.classes.values():
-        pkg = class_info.package or "default"
-        if pkg not in packages:
-            packages[pkg] = []
-        packages[pkg].append(class_info.name)
-    
-    print(f"\nSample classes by package:")
-    for pkg, classes in list(packages.items())[:5]:  # Show first 5 packages
-        print(f"  {pkg}: {classes[:3]}")  # Show first 3 classes per package
-    
-    # Debug: Show some class details
-    print(f"\nSample class details:")
-    for i, (class_name, class_info) in enumerate(list(parser.classes.items())[:3]):
-        print(f"  {class_name}:")
-        print(f"    Package: {class_info.package}")
-        print(f"    Fields: {list(class_info.fields.keys())[:5]}")  # First 5 fields
-        print(f"    Getters: {list(class_info.getters.keys())[:5]}")  # First 5 getters
-        print(f"    Field Types: {list(class_info.fields.values())[:5]}")  # First 5 types
-    
-    # Print summary
-    parser.print_analysis_summary()
-    
-    # Find potential root classes
-    root_candidates = parser.find_root_classes()
-    print(f"\nPotential Root Classes Found: {len(root_candidates)}")
-    for i, root_class in enumerate(root_candidates[:10], 1):  # Show first 10
-        print(f"{i}. {root_class}")
-    
-    if len(root_candidates) > 10:
-        print(f"... and {len(root_candidates) - 10} more")
-    
-    # Get root class from user
-    if root_candidates:
-        print(f"\nSuggested root class: {root_candidates[0]}")
-        root_class_input = input(f"Enter root class name (or press Enter for '{root_candidates[0]}'): ").strip()
-        root_class = root_class_input if root_class_input else root_candidates[0]
-    else:
-        root_class = input("Enter the root class name: ").strip()
-    
-    print(f"\nUsing root class: {root_class}")
-    
-    # Debug: Check if root class exists and show its details
-    if root_class not in parser.classes:
-        print(f"WARNING: Root class '{root_class}' not found in parsed classes!")
-        print("Available classes:", list(parser.classes.keys())[:10])
-        
-        # Try to find similar class names
-        similar_classes = [name for name in parser.classes.keys() if root_class.lower() in name.lower()]
-        if similar_classes:
-            print(f"Similar classes found: {similar_classes}")
-        return
-    
-    # Show root class details
-    root_info = parser.classes[root_class]
-    print(f"\nROOT CLASS DETAILS:")
-    print(f"Name: {root_info.name}")
-    print(f"Package: {root_info.package}")
-    print(f"Qualified name: {root_info.qualified_name}")
-    print(f"Total fields: {len(root_info.fields)}")
-    print(f"Total getters: {len(root_info.getters)}")
-    print(f"Field types: {list(root_info.fields.values())}")
-    print(f"Getter methods: {list(root_info.getters.keys())}")
-    
-    # Check if field types are resolved
-    print(f"\nTYPE RESOLUTION CHECK:")
-    for field_name, field_type in root_info.fields.items():
-        base_type = re.sub(r'<.*>', '', field_type).strip()
-        found_info = parser._find_class_info(base_type, root_info)
-        status = "✓ Found" if found_info else "✗ Missing"
-        print(f"  {field_name} ({field_type}): {status}")
-        if found_info:
-            print(f"    -> Resolved to: {found_info.qualified_name} with {len(found_info.getters)} getters")
-    
-    # Generate getter chains with more debugging
-    max_depth = int(input("Enter maximum depth for getter chains (default: 10): ") or "10")
-    print(f"\nStarting getter chain generation with max depth: {max_depth}")
-    chains = parser.generate_getter_chains(root_class, max_depth)
-    
-    # Handle case where chains is None or empty
-    if not chains:
-        print(f"No getter chains found for class '{root_class}'. Please check:")
-        print("1. The class name is correct")
-        print("2. The class has getter methods")
-        print("3. The Java files were parsed correctly")
-        return
-    
-    # Display results
-    print(f"\n{'='*60}")
-    print(f"GETTER CHAINS FOR {root_class}")
-    print(f"{'='*60}")
-    print(f"Total chains found: {len(chains)}")
-    print("\nFirst 20 getter chains:")
-    for i, chain in enumerate(chains[:20], 1):
-        print(f"{i:2d}. {chain}")
-        
-    if len(chains) > 20:
-        print(f"\n... and {len(chains) - 20} more chains")
-    
-    # Export results
-    output_file = f"getter_chains_{root_class.lower()}.json"
-    parser.export_results(output_file)
-    
-    # Also create a simple text file with just the chains
-    chains_file = f"getter_chains_{root_class.lower()}.txt"
-    with open(chains_file, 'w', encoding='utf-8') as f:
-        f.write(f"Getter Chains for {root_class}\n")
-        f.write(f"Generated on: {parser.stub_folder_path}\n")
-        f.write(f"Total chains: {len(chains)}\n\n")
-        for i, chain in enumerate(chains, 1):
-            f.write(f"{i:4d}. {chain}\n")
-    
-    print(f"\nGetter chains saved to: {chains_file}")
-    print("Analysis complete!")
-
-
-if __name__ == "__main__":
-    main()
+            json.dump(results, f,
