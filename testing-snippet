@@ -37,27 +37,82 @@ class JavaStubParser:
         """Parse all Java files in the stub folder and all subdirectories"""
         print(f"Parsing Java files recursively in: {self.stub_folder_path}")
         
+        # Debug: Show directory structure
+        print(f"Directory exists: {os.path.exists(self.stub_folder_path)}")
+        print(f"Directory is readable: {os.access(self.stub_folder_path, os.R_OK)}")
+        
+        # Collect all Java files with detailed logging
         java_files = []
+        directories_scanned = 0
+        
+        print(f"\nScanning directory structure:")
         for root, dirs, files in os.walk(self.stub_folder_path):
-            for file in files:
-                if file.endswith('.java'):
-                    file_path = os.path.join(root, file)
-                    java_files.append(file_path)
+            directories_scanned += 1
+            java_files_in_dir = [f for f in files if f.endswith('.java')]
+            
+            if java_files_in_dir or directories_scanned <= 10:  # Show first 10 dirs or dirs with Java files
+                relative_path = os.path.relpath(root, self.stub_folder_path)
+                print(f"  {relative_path}: {len(java_files_in_dir)} Java files {java_files_in_dir[:3]}")
+            
+            for file in java_files_in_dir:
+                file_path = os.path.join(root, file)
+                java_files.append(file_path)
         
-        print(f"Found {len(java_files)} Java files to parse")
+        print(f"\nSUMMARY:")
+        print(f"Directories scanned: {directories_scanned}")
+        print(f"Total Java files found: {len(java_files)}")
         
-        # First pass: collect all classes and their packages
-        for file_path in java_files:
+        if len(java_files) < 20:  # Show all files if few found
+            print(f"All Java files found:")
+            for i, file_path in enumerate(java_files, 1):
+                rel_path = os.path.relpath(file_path, self.stub_folder_path)
+                print(f"  {i:2d}. {rel_path}")
+        else:
+            print(f"Sample Java files found:")
+            for i, file_path in enumerate(java_files[:10], 1):
+                rel_path = os.path.relpath(file_path, self.stub_folder_path)
+                print(f"  {i:2d}. {rel_path}")
+            print(f"  ... and {len(java_files) - 10} more")
+        
+        if len(java_files) == 0:
+            print(f"ERROR: No Java files found in {self.stub_folder_path}")
+            print(f"Please check:")
+            print(f"1. The path is correct")
+            print(f"2. The directory contains .java files")
+            print(f"3. You have read permissions")
+            return
+        
+        # Parse all found files
+        print(f"\nParsing {len(java_files)} Java files...")
+        parsed_successfully = 0
+        
+        for i, file_path in enumerate(java_files, 1):
             try:
+                if i <= 5 or i % 50 == 0:  # Show progress for first 5 and every 50th
+                    rel_path = os.path.relpath(file_path, self.stub_folder_path)
+                    print(f"  Parsing {i:3d}/{len(java_files)}: {rel_path}")
+                
                 self._parse_single_file(file_path)
+                parsed_successfully += 1
             except Exception as e:
-                print(f"Error parsing {file_path}: {e}")
+                rel_path = os.path.relpath(file_path, self.stub_folder_path)
+                print(f"  ERROR parsing {rel_path}: {e}")
         
         # Build lookup maps for type resolution
         self._build_type_lookup_maps()
-                        
-        print(f"Parsed {len(self.classes)} classes from {len(java_files)} files")
-        print(f"Classes span across {len(set(info.package for info in self.classes.values() if info.package))} packages")
+        
+        print(f"\nPARSING RESULTS:")
+        print(f"Java files found: {len(java_files)}")
+        print(f"Files parsed successfully: {parsed_successfully}")
+        print(f"Classes extracted: {len(self.classes)}")
+        print(f"Unique packages: {len(set(info.package for info in self.classes.values() if info.package))}")
+        
+        if parsed_successfully < len(java_files):
+            print(f"WARNING: {len(java_files) - parsed_successfully} files failed to parse")
+            
+        if len(self.classes) == 0:
+            print(f"ERROR: No classes were extracted from the Java files")
+            print(f"This might indicate a parsing issue or the files don't contain standard Java classes")
         
     def _parse_single_file(self, file_path: str):
         """Parse a single Java file"""
@@ -125,13 +180,15 @@ class JavaStubParser:
             self.classes[class_name] = class_info
             self.qualified_classes[class_info.qualified_name] = class_info
             return
-            
-        # Parse fields with multiple patterns
+        
+        # Parse fields with multiple patterns - IMPROVED FIELD PARSING
         field_patterns = [
-            # Standard field declaration
-            r'(?:protected|private|public)?\s+(?:static\s+)?(?:final\s+)?([A-Za-z_][\w<>,\[\]\s]*)\s+(\w+)\s*[;=]',
-            # Fields with @XmlElement or other annotations
-            r'@\w+[^}]*?(?:protected|private|public)?\s+(?:static\s+)?(?:final\s+)?([A-Za-z_][\w<>,\[\]\s]*)\s+(\w+)\s*[;=]',
+            # Standard field declaration - more precise
+            r'(?:protected|private|public)\s+(?:static\s+)?(?:final\s+)?([A-Za-z_][\w<>,\[\]\.\s]*?)\s+(\w+)\s*[;=]',
+            # Fields with annotations
+            r'@[\w\(\)\"=,\s]*\n\s*(?:protected|private|public)\s+(?:static\s+)?(?:final\s+)?([A-Za-z_][\w<>,\[\]\.\s]*?)\s+(\w+)\s*[;=]',
+            # JAX-B and XML annotations
+            r'@XmlElement[^}]*?\n\s*(?:protected|private|public)?\s*([A-Za-z_][\w<>,\[\]\.\s]*?)\s+(\w+)\s*[;=]',
         ]
         
         all_field_matches = []
@@ -143,12 +200,19 @@ class JavaStubParser:
         seen_fields = set()
         unique_field_matches = []
         for field_type, field_name in all_field_matches:
-            if field_name not in seen_fields:
+            if field_name not in seen_fields and not field_name.startswith('serialVersionUID'):
                 seen_fields.add(field_name)
                 unique_field_matches.append((field_type, field_name))
         
+        # Debug: Show field parsing for problematic classes
+        if len(unique_field_matches) > 0 and len(unique_field_matches) <= 3:
+            print(f"DEBUG FIELD PARSING for {class_name}:")
+            for field_type, field_name in unique_field_matches:
+                clean_type = self._clean_type(field_type)
+                print(f"  Raw: '{field_type}' -> Clean: '{clean_type}' -> Field: '{field_name}'")
+        
         for field_type, field_name in unique_field_matches:
-            # Clean up the field type
+            # Clean up the field type - IMPROVED CLEANING
             field_type = self._clean_type(field_type)
             class_info.fields[field_name] = field_type
             
@@ -160,12 +224,12 @@ class JavaStubParser:
                 if element_match:
                     class_info.list_element_type = element_match.group(1).strip()
                     
-        # Parse getter methods with more comprehensive patterns
+        # Parse getter methods with more comprehensive patterns - IMPROVED GETTER PARSING
         getter_patterns = [
-            # Standard getters
-            r'(?:public|protected)\s+([A-Za-z_][\w<>,\[\]\s]*)\s+(get\w+|is\w+)\s*\([^)]*\)\s*{',
+            # Standard getters with return type capture
+            r'(?:public|protected)\s+([A-Za-z_][\w<>,\[\]\.\s]*?)\s+(get\w+|is\w+)\s*\([^)]*\)\s*\{',
             # Getters with annotations
-            r'@\w+[^}]*?(?:public|protected)\s+([A-Za-z_][\w<>,\[\]\s]*)\s+(get\w+|is\w+)\s*\([^)]*\)\s*{',
+            r'@[\w\(\)\"=,\s]*\n\s*(?:public|protected)\s+([A-Za-z_][\w<>,\[\]\.\s]*?)\s+(get\w+|is\w+)\s*\([^)]*\)\s*\{',
         ]
         
         all_getter_matches = []
@@ -181,13 +245,21 @@ class JavaStubParser:
                 seen_getters.add(getter_method)
                 unique_getter_matches.append((return_type, getter_method))
         
+        # Debug: Show getter parsing for problematic classes  
+        if len(unique_getter_matches) > 0 and len(unique_getter_matches) <= 3:
+            print(f"DEBUG GETTER PARSING for {class_name}:")
+            for return_type, getter_method in unique_getter_matches:
+                clean_type = self._clean_type(return_type)
+                print(f"  Getter: '{getter_method}' -> Raw: '{return_type}' -> Clean: '{clean_type}'")
+        
         for return_type, getter_method in unique_getter_matches:
             return_type = self._clean_type(return_type)
             # Infer field name from getter method
             field_name = self._getter_to_field_name(getter_method)
             
-            # Update field type if we found it through getter
+            # Update field type if we found it through getter (getters are more reliable)
             if field_name in class_info.fields:
+                # Use getter return type as it's usually more accurate
                 class_info.fields[field_name] = return_type
             else:
                 class_info.fields[field_name] = return_type
@@ -198,11 +270,36 @@ class JavaStubParser:
         self.qualified_classes[class_info.qualified_name] = class_info
         
     def _clean_type(self, type_str: str) -> str:
-        """Clean up Java type string"""
-        # Remove extra whitespace
+        """Clean up Java type string - IMPROVED VERSION"""
+        if not type_str:
+            return type_str
+            
+        # Remove extra whitespace and newlines
         type_str = ' '.join(type_str.split())
-        # Handle generic types
+        
+        # Handle generic types properly
         type_str = type_str.replace(' <', '<').replace('< ', '<').replace(' >', '>')
+        type_str = type_str.replace(' ,', ',').replace(', ', ',')
+        
+        # Remove common annotations that might be mixed in
+        type_str = re.sub(r'@\w+(\([^)]*\))?\s*', '', type_str)
+        
+        # Remove 'final', 'static' keywords that might have been captured
+        type_str = re.sub(r'\b(final|static)\s+', '', type_str)
+        
+        # Handle array notation
+        type_str = type_str.replace('[ ]', '[]').replace(' []', '[]')
+        
+        # Clean up any remaining extra spaces
+        type_str = re.sub(r'\s+', ' ', type_str).strip()
+        
+        # Common problematic patterns in WSDL-generated code
+        # Remove namespace prefixes that might be captured (like "ns1:CustomerType" -> "CustomerType")
+        if ':' in type_str and not type_str.startswith('http'):  # Don't remove from URLs
+            parts = type_str.split(':')
+            if len(parts) == 2 and not parts[0].endswith('//'):  # Not a URL
+                type_str = parts[1]
+        
         return type_str.strip()
         
     def _getter_to_field_name(self, getter_method: str) -> str:
