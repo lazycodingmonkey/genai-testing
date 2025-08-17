@@ -201,78 +201,80 @@ class JavaStubParser:
             self.class_name_to_qualified[simple_name].append(class_info.qualified_name)
 
     def _find_class_info(self, type_name: str, current_class_info: 'ClassInfo' = None) -> Optional['ClassInfo']:
-        """Find ClassInfo for a given type name using a robust Java resolution strategy"""
+        """
+        Finds ClassInfo for a given type name based on a robust Java resolution strategy.
+        It must be given the context of the parent class (current_class_info) to work correctly.
+        """
         base_type = re.sub(r'<.*>', '', type_name).strip()
 
-        # If the type is already a fully qualified name, just look it up.
-        if '.' in base_type:
-            if base_type in self.qualified_classes:
-                return self.qualified_classes[base_type]
-            # It's an external library not in our stubs
+        if not current_class_info:
+            return None
+            
+        # 1. Handle primitive types
+        if base_type in self.primitive_types:
             return None
 
-        # --- Resolution by Java's import rules ---
+        # 2. Look for explicit import
+        for import_name in current_class_info.imports:
+            if import_name.endswith('.' + base_type):
+                resolved_class_info = self.qualified_classes.get(import_name)
+                if resolved_class_info:
+                    print(f"    - Type '{base_type}' resolved via explicit import to '{import_name}'")
+                    return resolved_class_info
 
-        # 1. Look for explicit import
-        if current_class_info:
-            for import_name in current_class_info.imports:
-                if import_name.endswith('.' + base_type):
-                    if import_name in self.qualified_classes:
-                        print(f"    - Type '{base_type}' resolved via explicit import to '{import_name}'")
-                        return self.qualified_classes[import_name]
-
-        # 2. Look in the same package as the current class
-        if current_class_info and current_class_info.package:
+        # 3. Look in the same package as the current class
+        if current_class_info.package:
             qualified_name = f"{current_class_info.package}.{base_type}"
-            if qualified_name in self.qualified_classes:
+            resolved_class_info = self.qualified_classes.get(qualified_name)
+            if resolved_class_info:
                 print(f"    - Type '{base_type}' resolved via same package to '{qualified_name}'")
-                return self.qualified_classes[qualified_name]
-
-        # 3. Fallback: Find by simple name (potential for ambiguity)
+                return resolved_class_info
+        
+        # 4. Fallback to simple name lookup (this is where ambiguity occurs)
         if base_type in self.class_name_to_qualified:
             candidates = self.class_name_to_qualified[base_type]
             if len(candidates) == 1:
                 print(f"    - Type '{base_type}' resolved uniquely to '{candidates[0]}'")
                 return self.qualified_classes.get(candidates[0])
             elif candidates:
-                # Ambiguous case: pick the first one, but print a warning
-                print(f"    - WARNING: Type '{base_type}' is ambiguous. Found candidates: {candidates}. Selecting first one.")
+                # We've exhausted reliable methods. The script will pick a candidate.
+                print(f"    - AMBIGUOUS RESOLUTION WARNING: '{base_type}' could not be resolved by import or package. Found candidates: {candidates}. Selecting a potentially incorrect candidate.")
                 return self.qualified_classes.get(candidates[0])
 
-        print(f"    - Type '{base_type}' could not be resolved.")
         return None
 
     def generate_getter_chains(self, root_class_name: str, max_depth: int = 10):
-        """Generate all possible getter chains from the root class using a robust BFS"""
-        if root_class_name not in self.classes:
+        """Generate all possible getter chains from the root class using a robust, qualified-name-based BFS"""
+        root_info = self.classes.get(root_class_name)
+        if not root_info:
             print(f"Root class '{root_class_name}' not found! Check spelling or if it was parsed.")
             return []
-
-        root_info = self.classes[root_class_name]
+            
         all_chains = set()
-        queue = deque([(root_info.name, "", 0)])  # (class_name, current_chain_prefix, depth)
-        visited = set()  # To prevent infinite loops with circular dependencies
+        # The queue now stores the qualified name to avoid ambiguity
+        queue = deque([(root_info.qualified_name, "", 0)])
+        visited = set()
 
-        print(f"\nStarting BFS for getter chains from '{root_class_name}'...")
-
+        print(f"\nStarting BFS for getter chains from '{root_info.qualified_name}'...")
+        
         while queue:
-            current_class_name, current_chain, depth = queue.popleft()
-
+            current_qualified_name, current_chain, depth = queue.popleft()
+            
             if depth >= max_depth:
                 continue
-
-            current_info = self._find_class_info(current_class_name, self.classes.get(root_class_name))
+            
+            current_info = self.qualified_classes.get(current_qualified_name)
             if not current_info:
-                # This is the new, more helpful debug message
-                print(f"  - Chain stopped at '{current_chain}': Type '{current_class_name}' could not be resolved. This type might not exist in the provided stub files.")
+                print(f"  - Chain stopped at '{current_chain}': Qualified type '{current_qualified_name}' not found.")
                 continue
 
-            if (current_class_name, current_chain) in visited:
+            # We've solved the ambiguity, so this is now just a check for cycles
+            if (current_qualified_name, current_chain) in visited:
                 continue
-            visited.add((current_class_name, current_chain))
-
+            visited.add((current_qualified_name, current_chain))
+            
             print(f"  Processing '{current_info.qualified_name}' at depth {depth}.")
-
+            
             if not current_info.getters:
                 continue
 
@@ -295,14 +297,16 @@ class JavaStubParser:
                         if element_info:
                             indexed_chain = new_chain + ".get(i)"
                             all_chains.add(indexed_chain)
-                            queue.append((element_info.name, indexed_chain, depth + 1))
+                            # Append qualified name to the queue
+                            queue.append((element_info.qualified_name, indexed_chain, depth + 1))
                 elif field_type not in self.primitive_types:
                     target_class_info = self._find_class_info(field_type, current_info)
                     if target_class_info:
-                        queue.append((target_class_info.name, new_chain, depth + 1))
+                        # Append qualified name to the queue
+                        queue.append((target_class_info.qualified_name, new_chain, depth + 1))
 
         formatted_chains = [f"rootObject.{chain}" for chain in all_chains]
-
+        
         self.getter_chains[root_class_name] = sorted(list(set(formatted_chains)))
         return self.getter_chains[root_class_name]
 
@@ -441,3 +445,10 @@ def main():
         f.write(f"Total chains: {len(chains)}\n\n")
         for i, chain in enumerate(chains, 1):
             f.write(f"{i:4d}. {chain}\n")
+
+    print(f"\nGetter chains saved to: {chains_file}")
+    print("Analysis complete!")
+
+
+if __name__ == "__main__":
+    main()
