@@ -170,10 +170,13 @@ class JavaStubParser:
                 return
                 
             if current_class not in self.classes:
+                print(f"DEBUG: Class '{current_class}' not found in parsed classes")
                 return
                 
             visited.add(current_class)
             class_info = self.classes[current_class]
+            
+            print(f"DEBUG: Processing class '{current_class}' at depth {depth}, getters: {list(class_info.getters.keys())}")
             
             # Add current chain if it's not empty
             if chain:
@@ -182,12 +185,14 @@ class JavaStubParser:
             # Explore each field/getter
             for getter_method, field_name in class_info.getters.items():
                 field_type = class_info.fields.get(field_name, '')
+                print(f"DEBUG: Getter '{getter_method}' -> field '{field_name}' -> type '{field_type}'")
                 
                 # Handle List types
                 if field_type.startswith('List<') or field_type.startswith('ArrayList<'):
                     element_type = re.search(r'List<([^>]+)>', field_type)
                     if element_type:
                         element_class = element_type.group(1).strip()
+                        print(f"DEBUG: Found list element type: '{element_class}'")
                         new_chain = chain + [f"{getter_method}()"]
                         all_chains.append(new_chain.copy())
                         
@@ -197,10 +202,14 @@ class JavaStubParser:
                         
                         # Continue with the element type
                         if element_class not in self.primitive_types and element_class in self.classes:
+                            print(f"DEBUG: Continuing DFS with element class '{element_class}'")
                             dfs(element_class, indexed_chain, depth + 1)
+                        else:
+                            print(f"DEBUG: Element class '{element_class}' is primitive or not found")
                 
                 # Handle regular object types
                 elif field_type not in self.primitive_types and field_type in self.classes:
+                    print(f"DEBUG: Found complex type '{field_type}', continuing DFS")
                     new_chain = chain + [f"{getter_method}()"]
                     dfs(field_type, new_chain, depth + 1)
                 
@@ -208,6 +217,9 @@ class JavaStubParser:
                 elif field_type in self.primitive_types:
                     primitive_chain = chain + [f"{getter_method}()"]
                     all_chains.append(primitive_chain.copy())
+                    print(f"DEBUG: Added primitive chain: {primitive_chain}")
+                else:
+                    print(f"DEBUG: Type '{field_type}' not found - might be missing from parsed classes")
             
             visited.remove(current_class)
         
@@ -268,8 +280,11 @@ class JavaStubParser:
         print(f"List Wrapper Classes: {list_wrapper_count}")
         print(f"Regular Classes: {len(self.classes) - enum_count - list_wrapper_count}")
         
-        for root_class, chains in self.getter_chains.items():
-            print(f"\nGetter Chains for {root_class}: {len(chains)} chains found")
+        # Only show getter chains if they exist
+        if self.getter_chains:
+            for root_class, chains in self.getter_chains.items():
+                chain_count = len(chains) if chains else 0
+                print(f"\nGetter Chains for {root_class}: {chain_count} chains found")
             
     def find_root_classes(self) -> List[str]:
         """Identify potential root classes (classes that are not referenced as field types)"""
@@ -304,6 +319,9 @@ def main():
     # Parse all Java files
     parser.parse_java_files()
     
+    # Debug: Show some parsed classes
+    print(f"\nSample of parsed classes: {list(parser.classes.keys())[:5]}")
+    
     # Print summary
     parser.print_analysis_summary()
     
@@ -323,6 +341,14 @@ def main():
         root_class = root_class_input if root_class_input else root_candidates[0]
     else:
         root_class = input("Enter the root class name: ").strip()
+    
+    print(f"\nUsing root class: {root_class}")
+    
+    # Debug: Check if root class exists
+    if root_class not in parser.classes:
+        print(f"WARNING: Root class '{root_class}' not found in parsed classes!")
+        print("Available classes:", list(parser.classes.keys())[:10])
+        return
     
     # Generate getter chains
     max_depth = int(input("Enter maximum depth for getter chains (default: 8): ") or "8")
