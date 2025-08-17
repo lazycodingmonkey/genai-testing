@@ -14,7 +14,11 @@ class JavaStubParser:
         self.primitive_types = {
             'String', 'Integer', 'int', 'Long', 'long', 'Double', 'double', 
             'Float', 'float', 'Boolean', 'boolean', 'BigDecimal', 'BigInteger',
-            'Date', 'Calendar', 'XMLGregorianCalendar', 'byte[]', 'Byte'
+            'Date', 'Calendar', 'XMLGregorianCalendar', 'byte[]', 'Byte',
+            'Short', 'short', 'Character', 'char', 'Object', 'Number',
+            'LocalDate', 'LocalDateTime', 'LocalTime', 'Instant', 'Duration',
+            'UUID', 'URI', 'URL', 'BigInteger', 'AtomicInteger', 'AtomicLong',
+            'byte', 'Byte[]', 'char[]', 'String[]'
         }
         
     class ClassInfo:
@@ -122,11 +126,28 @@ class JavaStubParser:
             self.qualified_classes[class_info.qualified_name] = class_info
             return
             
-        # Parse fields
-        field_pattern = r'(?:protected|private|public)?\s+(?:static\s+)?(?:final\s+)?([A-Za-z_][\w<>,\[\]\s]*)\s+(\w+)\s*[;=]'
-        field_matches = re.findall(field_pattern, class_body)
+        # Parse fields with multiple patterns
+        field_patterns = [
+            # Standard field declaration
+            r'(?:protected|private|public)?\s+(?:static\s+)?(?:final\s+)?([A-Za-z_][\w<>,\[\]\s]*)\s+(\w+)\s*[;=]',
+            # Fields with @XmlElement or other annotations
+            r'@\w+[^}]*?(?:protected|private|public)?\s+(?:static\s+)?(?:final\s+)?([A-Za-z_][\w<>,\[\]\s]*)\s+(\w+)\s*[;=]',
+        ]
         
-        for field_type, field_name in field_matches:
+        all_field_matches = []
+        for pattern in field_patterns:
+            matches = re.findall(pattern, class_body, re.MULTILINE | re.DOTALL)
+            all_field_matches.extend(matches)
+        
+        # Remove duplicates while preserving order
+        seen_fields = set()
+        unique_field_matches = []
+        for field_type, field_name in all_field_matches:
+            if field_name not in seen_fields:
+                seen_fields.add(field_name)
+                unique_field_matches.append((field_type, field_name))
+        
+        for field_type, field_name in unique_field_matches:
             # Clean up the field type
             field_type = self._clean_type(field_type)
             class_info.fields[field_name] = field_type
@@ -139,11 +160,28 @@ class JavaStubParser:
                 if element_match:
                     class_info.list_element_type = element_match.group(1).strip()
                     
-        # Parse getter methods
-        getter_pattern = r'(?:public|protected)\s+([A-Za-z_][\w<>,\[\]\s]*)\s+(get\w+|is\w+)\s*\([^)]*\)\s*{'
-        getter_matches = re.findall(getter_pattern, class_body)
+        # Parse getter methods with more comprehensive patterns
+        getter_patterns = [
+            # Standard getters
+            r'(?:public|protected)\s+([A-Za-z_][\w<>,\[\]\s]*)\s+(get\w+|is\w+)\s*\([^)]*\)\s*{',
+            # Getters with annotations
+            r'@\w+[^}]*?(?:public|protected)\s+([A-Za-z_][\w<>,\[\]\s]*)\s+(get\w+|is\w+)\s*\([^)]*\)\s*{',
+        ]
         
-        for return_type, getter_method in getter_matches:
+        all_getter_matches = []
+        for pattern in getter_patterns:
+            matches = re.findall(pattern, class_body, re.MULTILINE | re.DOTALL)
+            all_getter_matches.extend(matches)
+        
+        # Remove duplicates
+        seen_getters = set()
+        unique_getter_matches = []
+        for return_type, getter_method in all_getter_matches:
+            if getter_method not in seen_getters:
+                seen_getters.add(getter_method)
+                unique_getter_matches.append((return_type, getter_method))
+        
+        for return_type, getter_method in unique_getter_matches:
             return_type = self._clean_type(return_type)
             # Infer field name from getter method
             field_name = self._getter_to_field_name(getter_method)
@@ -427,8 +465,32 @@ def main():
     # Parse all Java files
     parser.parse_java_files()
     
-    # Debug: Show some parsed classes
-    print(f"\nSample of parsed classes: {list(parser.classes.keys())[:5]}")
+    # Enhanced Debug: Show comprehensive parsing results
+    print(f"\nDETAILED PARSING RESULTS:")
+    print(f"Total Java files found: {sum(1 for root, dirs, files in os.walk(parser.stub_folder_path) for file in files if file.endswith('.java'))}")
+    print(f"Total classes parsed: {len(parser.classes)}")
+    print(f"Packages found: {len(set(info.package for info in parser.classes.values() if info.package))}")
+    
+    # Show sample classes from different packages
+    packages = {}
+    for class_info in parser.classes.values():
+        pkg = class_info.package or "default"
+        if pkg not in packages:
+            packages[pkg] = []
+        packages[pkg].append(class_info.name)
+    
+    print(f"\nSample classes by package:")
+    for pkg, classes in list(packages.items())[:5]:  # Show first 5 packages
+        print(f"  {pkg}: {classes[:3]}")  # Show first 3 classes per package
+    
+    # Debug: Show some class details
+    print(f"\nSample class details:")
+    for i, (class_name, class_info) in enumerate(list(parser.classes.items())[:3]):
+        print(f"  {class_name}:")
+        print(f"    Package: {class_info.package}")
+        print(f"    Fields: {list(class_info.fields.keys())[:5]}")  # First 5 fields
+        print(f"    Getters: {list(class_info.getters.keys())[:5]}")  # First 5 getters
+        print(f"    Field Types: {list(class_info.fields.values())[:5]}")  # First 5 types
     
     # Print summary
     parser.print_analysis_summary()
@@ -452,14 +514,41 @@ def main():
     
     print(f"\nUsing root class: {root_class}")
     
-    # Debug: Check if root class exists
+    # Debug: Check if root class exists and show its details
     if root_class not in parser.classes:
         print(f"WARNING: Root class '{root_class}' not found in parsed classes!")
         print("Available classes:", list(parser.classes.keys())[:10])
+        
+        # Try to find similar class names
+        similar_classes = [name for name in parser.classes.keys() if root_class.lower() in name.lower()]
+        if similar_classes:
+            print(f"Similar classes found: {similar_classes}")
         return
     
-    # Generate getter chains
-    max_depth = int(input("Enter maximum depth for getter chains (default: 8): ") or "8")
+    # Show root class details
+    root_info = parser.classes[root_class]
+    print(f"\nROOT CLASS DETAILS:")
+    print(f"Name: {root_info.name}")
+    print(f"Package: {root_info.package}")
+    print(f"Qualified name: {root_info.qualified_name}")
+    print(f"Total fields: {len(root_info.fields)}")
+    print(f"Total getters: {len(root_info.getters)}")
+    print(f"Field types: {list(root_info.fields.values())}")
+    print(f"Getter methods: {list(root_info.getters.keys())}")
+    
+    # Check if field types are resolved
+    print(f"\nTYPE RESOLUTION CHECK:")
+    for field_name, field_type in root_info.fields.items():
+        base_type = re.sub(r'<.*>', '', field_type).strip()
+        found_info = parser._find_class_info(base_type, root_info)
+        status = "✓ Found" if found_info else "✗ Missing"
+        print(f"  {field_name} ({field_type}): {status}")
+        if found_info:
+            print(f"    -> Resolved to: {found_info.qualified_name} with {len(found_info.getters)} getters")
+    
+    # Generate getter chains with more debugging
+    max_depth = int(input("Enter maximum depth for getter chains (default: 10): ") or "10")
+    print(f"\nStarting getter chain generation with max depth: {max_depth}")
     chains = parser.generate_getter_chains(root_class, max_depth)
     
     # Handle case where chains is None or empty
